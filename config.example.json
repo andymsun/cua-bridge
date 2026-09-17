@@ -1,0 +1,26 @@
+{
+  "mode": "attached",
+  "attachTo": "Claude",
+  "anchor": "bottom-right",
+  "hideWhenHostInactive": true,
+  "margin": 16,
+
+  "width": 460,
+  "fps": 30,
+  "showCursor": true,
+
+  "opacity": 1.0,
+  "cornerRadius": 10,
+  "clickThrough": false,
+
+  "controlsCorner": "top-left",
+  "glyphClose": "xmark",
+  "glyphAction": "cursorarrow.click.badge.clock",
+  "glyphSize": 20,
+  "glyphInset": 14,
+  "glyphGap": 26,
+  "glyphTint": "auto",
+  "scrimOpacity": 0.38,
+  "hoverFadeIn": 0.12,
+  "hoverFadeOut": 0.25
+}
