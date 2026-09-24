@@ -251,6 +251,61 @@ func postText(pid: pid_t, text: String) {
     }
 }
 
+/// Click semantics through Accessibility: right-click shows the element's menu,
+/// double-click opens it (or presses twice when it has no open action).
+func click(_ el: AXUIElement, button: String, count: Int) throws {
+    if button.hasPrefix("r") {
+        guard axPerform(el, "AXShowMenu") else { throw AgentError("This element has no context menu") }
+        return
+    }
+    if count >= 2 {
+        if axActions(el).contains("AXOpen"), axPerform(el, "AXOpen") { return }
+        try press(el); usleep(60_000); try press(el); return
+    }
+    try press(el)
+}
+
+/// Scroll the nearest scroll area at or above an element by pages.
+func scroll(_ e: AXUIElement, direction dir: String, pages: Int) throws -> AXUIElement {
+    var area: AXUIElement? = e
+    while let a = area, axString(a, kAXRoleAttribute) != "AXScrollArea" { area = ax(a, kAXParentAttribute).map { $0 as! AXUIElement } }
+    guard let sa = area else { throw AgentError("No scroll area at or above this element") }
+    let key = dir.hasPrefix("u") ? "up" : dir.hasPrefix("l") ? "left" : dir.hasPrefix("r") ? "right" : "down"
+    let action = ["up": "AXScrollUpByPage", "down": "AXScrollDownByPage", "left": "AXScrollLeftByPage", "right": "AXScrollRightByPage"][key]!
+    if axActions(sa).contains(action), (0..<pages).allSatisfy({ _ in axPerform(sa, action) }) { return sa }
+    let barAttr = (key == "left" || key == "right") ? kAXHorizontalScrollBarAttribute : kAXVerticalScrollBarAttribute
+    guard let bar = ax(sa, barAttr).map({ $0 as! AXUIElement }), let v = (ax(bar, kAXValueAttribute) as? NSNumber)?.doubleValue
+    else { throw AgentError("This area cannot be scrolled through Accessibility") }
+    let delta = (key == "up" || key == "left" ? -0.2 : 0.2) * Double(pages)
+    axSet(bar, kAXValueAttribute, NSNumber(value: min(1, max(0, v + delta))))
+    return sa
+}
+
+/// Select `text` in an editable element, or put the caret before/after it.
+func selectText(_ el: AXUIElement, text: String, prefix: String, suffix: String, type: String) throws {
+    axSet(el, kAXFocusedAttribute, kCFBooleanTrue)
+    guard let value = ax(el, kAXValueAttribute) as? String else { throw AgentError("This element has no editable text") }
+    let hay = value as NSString
+    let r = hay.range(of: prefix + text + suffix)
+    guard r.location != NSNotFound else { throw AgentError("\"\(text)\" not found in the element") }
+    let start = r.location + (prefix as NSString).length, len = (text as NSString).length
+    var range = type == "cursor_before" ? CFRange(location: start, length: 0)
+        : type == "cursor_after" ? CFRange(location: start + len, length: 0) : CFRange(location: start, length: len)
+    guard let v = AXValueCreate(.cfRange, &range), AXUIElementSetAttributeValue(el, kAXSelectedTextRangeAttribute as CFString, v) == .success
+    else { throw AgentError("This element doesn't allow setting a selection") }
+}
+
+/// Drag with mouse events posted to one process only - the user's cursor never moves.
+func drag(pid: pid_t, from a: CGPoint, to b: CGPoint) {
+    let steps = max(4, Int(hypot(b.x - a.x, b.y - a.y) / 20))
+    func post(_ type: CGEventType, _ p: CGPoint) {
+        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)?.postToPid(pid)
+    }
+    post(.leftMouseDown, a); usleep(30_000)
+    for i in 1...steps { post(.leftMouseDragged, CGPoint(x: a.x + (b.x - a.x) * CGFloat(i) / CGFloat(steps), y: a.y + (b.y - a.y) * CGFloat(i) / CGFloat(steps))); usleep(12_000) }
+    post(.leftMouseUp, b)
+}
+
 // MARK: - apps
 
 func runningApps() -> [[String: Any]] {
@@ -372,12 +427,13 @@ func handle(_ req: [String: Any]) throws -> Any {
 
     switch cmd {
     case "status":
-        return ["accessibility": AXIsProcessTrusted(), "screenRecording": CGPreflightScreenCaptureAccess(), "pid": Int(getpid()), "version": "2.0.0"]
+        return ["accessibility": AXIsProcessTrusted(), "screenRecording": CGPreflightScreenCaptureAccess(), "pid": Int(getpid()), "version": "2.1.0"]
     case "apps": return runningApps()
     case "resolve": return try resolve(req["query"] as? String ?? "")
     case "snapshot": return try snapshot(pid: try needPid(), maxDepth: (req["maxDepth"] as? NSNumber)?.intValue ?? 30)
     case "press":
-        let e = try el(); let c = center(try needPid(), e); try press(e)
+        let e = try el(); let c = center(try needPid(), e)
+        try click(e, button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
         return ["center": c as Any]
     case "pressAt":
         let p = try needPid()
@@ -386,7 +442,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         var hit: AXUIElement?
         guard AXUIElementCopyElementAtPosition(appElement(p), Float(t.window.minX + x), Float(t.window.minY + y), &hit) == .success, let h = hit
         else { throw AgentError("Nothing accessible at \(x),\(y)") }
-        try press(h)
+        try click(h, button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
         return ["center": ["x": x / Double(t.window.width), "y": y / Double(t.window.height)]]
     case "focus":
         let e = try el(); axSet(e, kAXFocusedAttribute, kCFBooleanTrue)
@@ -405,22 +461,29 @@ func handle(_ req: [String: Any]) throws -> Any {
         guard axPerform(e, actual) else { throw AgentError("Action \(name) failed. Available: \(acts.joined(separator: ", "))") }
         return ["center": center(try needPid(), e) as Any]
     case "scroll":
-        let e = try el(); let dir = (req["direction"] as? String ?? "down").lowercased()
-        let pages = max(1, (req["pages"] as? NSNumber)?.intValue ?? 1)
-        var area: AXUIElement? = e
-        while let a = area, axString(a, kAXRoleAttribute) != "AXScrollArea" { area = ax(a, kAXParentAttribute).map { $0 as! AXUIElement } }
-        guard let sa = area else { throw AgentError("No scroll area at or above this element") }
-        let action = ["up": "AXScrollUpByPage", "down": "AXScrollDownByPage", "left": "AXScrollLeftByPage", "right": "AXScrollRightByPage"][String(dir.prefix(1)) == "u" ? "up" : String(dir.prefix(1)) == "l" ? "left" : String(dir.prefix(1)) == "r" ? "right" : "down"]!
-        var done = false
-        if axActions(sa).contains(action) { done = (0..<pages).allSatisfy { _ in axPerform(sa, action) } }
-        if !done {
-            let barAttr = (dir.hasPrefix("l") || dir.hasPrefix("r")) ? kAXHorizontalScrollBarAttribute : kAXVerticalScrollBarAttribute
-            guard let bar = ax(sa, barAttr).map({ $0 as! AXUIElement }), let v = (ax(bar, kAXValueAttribute) as? NSNumber)?.doubleValue
-            else { throw AgentError("This area cannot be scrolled through Accessibility") }
-            let delta = (dir.hasPrefix("u") || dir.hasPrefix("l") ? -0.2 : 0.2) * Double(pages)
-            axSet(bar, kAXValueAttribute, NSNumber(value: min(1, max(0, v + delta))))
-        }
+        let dir = (req["direction"] as? String ?? "down").lowercased(), pages = max(1, (req["pages"] as? NSNumber)?.intValue ?? 1)
+        let sa = try scroll(try el(), direction: dir, pages: pages)
         return ["center": center(try needPid(), sa) as Any]
+    case "scrollAt":
+        let p = try needPid()
+        guard let t = tables[p] else { throw AgentError("Read the app first") }
+        let x = (req["x"] as? NSNumber)?.doubleValue ?? 0, y = (req["y"] as? NSNumber)?.doubleValue ?? 0
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(appElement(p), Float(t.window.minX + x), Float(t.window.minY + y), &hit) == .success, let h = hit
+        else { throw AgentError("Nothing accessible at \(x),\(y)") }
+        let dir = (req["direction"] as? String ?? "down").lowercased(), pages = max(1, (req["pages"] as? NSNumber)?.intValue ?? 1)
+        _ = try scroll(h, direction: dir, pages: pages)
+        return ["center": ["x": x / Double(t.window.width), "y": y / Double(t.window.height)]]
+    case "selectText":
+        let e = try el()
+        try selectText(e, text: req["text"] as? String ?? "", prefix: req["prefix"] as? String ?? "", suffix: req["suffix"] as? String ?? "", type: req["selectionType"] as? String ?? "text")
+        return ["center": center(try needPid(), e) as Any]
+    case "drag":
+        let p = try needPid()
+        guard let t = tables[p] else { throw AgentError("Read the app first") }
+        let n = { (k: String) in CGFloat((req[k] as? NSNumber)?.doubleValue ?? 0) }
+        drag(pid: p, from: CGPoint(x: t.window.minX + n("fromX"), y: t.window.minY + n("fromY")), to: CGPoint(x: t.window.minX + n("toX"), y: t.window.minY + n("toY")))
+        return ["center": ["x": Double(n("toX")) / Double(t.window.width), "y": Double(n("toY")) / Double(t.window.height)]]
     case "typeText":
         let p = try needPid(); let text = req["text"] as? String ?? ""
         var target: AXUIElement?
