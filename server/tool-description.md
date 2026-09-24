@@ -28,4 +28,8 @@ await app.scroll(3, "down");  await app.screenshot();
 
 Output: `read`, `find` and `screenshot` print into the result themselves (pass `{ emit: false }` to suppress). Use `write(value)` / `image(buffer)` for anything else, or `return` a value. Filter large data in code and write only what matters.
 
+Showing your work: the first `cua.open()` in a session prints a live-view URL. If your harness has a browser pane or sidebar, open that URL in it right away - it is the user's in-app view of your browser (tabs, your cursor, and take-over).
+
+CAPTCHAs and human checks: never try to solve them. Tell the user and let them complete it in the live view.
+
 Rules: re-read after acting and use fresh indices; if an action has no effect, look for a blocker before retrying. Confirm with the user before sending messages, submitting forms with side effects, purchases, deleting data, or entering credentials. `cua.ui()` gives the user a live, take-over-able view of the browser.

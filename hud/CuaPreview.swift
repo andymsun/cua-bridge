@@ -157,6 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cfg = Cfg.load()
     var lastFrame: Date?, lastCursorT: Double = 0
     var hovering = false, userMoved = false
+    var lastTint = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -240,17 +241,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scrim.endPoint = CGPoint(x: left ? 0.62 : 0.38, y: top ? 0.15 : 0.85)
     }
 
-    /// Glyphs dark on light pages, light on dark pages.
+    /// Glyphs dark on light pages, light on dark pages. Samples a 16x10 thumbnail of the
+    /// controls corner at most every 1.5s - never the full frame.
     func retint(_ img: NSImage) {
+        if Date().timeIntervalSince(lastTint) < 1.5 { return }
+        lastTint = Date()
         var light = false
-        if cfg.glyphTint == "auto", let tiff = img.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff) {
-            var total: CGFloat = 0, n: CGFloat = 0
-            for x in stride(from: 0, to: min(90, bmp.pixelsWide), by: 6) {
-                for y in stride(from: 0, to: min(60, bmp.pixelsHigh), by: 6) {
-                    if let c = bmp.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) { total += c.brightnessComponent; n += 1 }
-                }
+        if cfg.glyphTint == "auto", let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            let cw = 16, ch = 10
+            let region = CGRect(x: cfg.controlsCorner.hasSuffix("left") ? 0 : cg.width * 3 / 4,
+                                y: cfg.controlsCorner.hasPrefix("top") ? 0 : cg.height * 3 / 4,
+                                width: cg.width / 4, height: cg.height / 4)
+            var px = [UInt8](repeating: 0, count: cw * ch * 4)
+            if let crop = cg.cropping(to: region),
+               let c = CGContext(data: &px, width: cw, height: ch, bitsPerComponent: 8, bytesPerRow: cw * 4,
+                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+                c.interpolationQuality = .low
+                c.draw(crop, in: CGRect(x: 0, y: 0, width: cw, height: ch))
+                var total = 0
+                for i in stride(from: 0, to: px.count, by: 4) { total += Int(px[i]) * 299 + Int(px[i + 1]) * 587 + Int(px[i + 2]) * 114 }
+                light = Double(total) / Double(cw * ch * 1000 * 255) > 0.55
             }
-            light = n > 0 && total / n > 0.55
         } else { light = cfg.glyphTint == "dark" }
         let tint: NSColor = light ? .black : .white
         closeGlyph.tint = tint; actionGlyph.tint = tint

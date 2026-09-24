@@ -2,7 +2,7 @@
 // browser with its own profile and drives it entirely over CDP. All input is
 // page-level (Input.dispatch*), so the user's real cursor and keyboard are never
 // involved - with the default headless mode there is no window at all.
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CDP } from "./cdp.mjs";
@@ -36,6 +36,7 @@ export class BrowserEngine {
   #starting = null;
   #streamingTab = null;
   consumers = 0;             // live-view clients + HUD; screencast runs only when > 0
+  viewport = null;           // { w, h, dpr } requested by the live view; null = config viewport
 
   constructor(hooks = {}) { this.hooks = hooks; }
 
@@ -95,11 +96,21 @@ export class BrowserEngine {
       "--remote-debugging-port=0", `--user-data-dir=${profile}`,
       "--no-first-run", "--no-default-browser-check", "--disable-features=Translate",
       "--hide-crash-restore-bubble", `--window-size=${width},${height}`,
+      // keep rendering (and screencasting) while hidden or covered
+      "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
+      "--disable-background-timer-throttling",
       ...(cfg.headless ? ["--headless=new"] : []),
       "about:blank",
     ];
-    this.proc = spawn(exe, args, { stdio: "ignore", detached: false });
-    this.proc.on("exit", () => { this.proc = null; });
+    if (cfg.headless) {
+      this.proc = spawn(exe, args, { stdio: "ignore", detached: false });
+      this.proc.on("exit", () => { this.proc = null; });
+    } else {
+      // A real browser, launched hidden (-j) and without activation (-g): it never
+      // takes focus or shows a window, but has a genuine browser fingerprint.
+      const appBundle = exe.replace(/\/Contents\/MacOS\/[^/]+$/, "");
+      execFile("open", ["-n", "-g", "-j", "-a", appBundle, "--args", ...args], () => {});
+    }
     for (let i = 0; i < 100; i++) {
       await sleep(100);
       const ws = await this.#reuse(profile);
@@ -112,8 +123,9 @@ export class BrowserEngine {
     if (this.tabs.has(info.targetId)) return this.tabs.get(info.targetId);
     const { sessionId } = await this.cdp.send("Target.attachToTarget", { targetId: info.targetId, flatten: true });
     const tab = new Tab(this, info, sessionId);
+    tab.ready = tab.init();            // callers await this before driving the tab
     this.tabs.set(info.targetId, tab);
-    await tab.init();
+    await tab.ready;
     this.hooks.onTabs?.();
     return tab;
   }
@@ -141,21 +153,32 @@ export class BrowserEngine {
     // raise the window - that would steal focus from the user.
     if (tab && config().browser.headless) tab.send("Page.bringToFront").catch(() => {});
     this.hooks.onActive?.(tab);
+    tab?.applyViewport().catch(() => {});
     this.syncStreaming();
     this.hooks.onTabs?.();
   }
 
-  async syncStreaming() {
+  /** Match page size to the live view so it fills the pane, like Codex's in-app browser. */
+  async setViewport(vp) {
+    this.viewport = vp;
+    await this.active?.applyViewport().catch(() => {});
+    await this.syncStreaming(true);
+  }
+
+  async syncStreaming(restart = false) {
     const want = this.consumers > 0 ? this.active : null;
-    if (this.#streamingTab === want) return;
+    if (this.#streamingTab === want && !restart) return;
     const prev = this.#streamingTab;
     this.#streamingTab = want;
     if (prev) await prev.send("Page.stopScreencast").catch(() => {});
     if (want) {
       const s = config().stream;
+      const vp = this.viewport, dpr = vp?.dpr ?? 1;
       await want.send("Page.startScreencast", {
-        format: "jpeg", quality: s.quality, maxWidth: s.maxWidth, maxHeight: Math.round(s.maxWidth * 0.75),
-        everyNthFrame: Math.max(1, Math.round(60 / Math.max(1, s.fps))),
+        format: "jpeg", quality: s.quality,
+        maxWidth: Math.round(vp ? vp.w * dpr : s.maxWidth),
+        maxHeight: Math.round(vp ? vp.h * dpr : s.maxWidth),
+        everyNthFrame: 1,          // every compositor frame; screencast is change-driven anyway
       }).catch(() => {});
     }
   }
@@ -168,9 +191,13 @@ export class BrowserEngine {
 
   async newTab(url = "about:blank") {
     await this.ensure();
-    const { targetId } = await this.cdp.send("Target.createTarget", { url: "about:blank", background: !config().browser.headless });
+    const headless = config().browser.headless;
+    const { targetId } = await this.cdp.send("Target.createTarget", {
+      url: "about:blank", background: true, newWindow: !headless,
+    });
     for (let i = 0; i < 50 && !this.tabs.has(targetId); i++) await sleep(20);
     const tab = this.tabs.get(targetId) ?? await this.#attach({ targetId, type: "page", title: "", url: "about:blank" });
+    await tab.ready;
     this.setActive(tab);
     if (url && url !== "about:blank") await tab.goto(url);
     return tab;
@@ -248,6 +275,15 @@ export class Tab {
 
   async viewportSize() { return this.#viewport ?? this.#viewportSize(); }
 
+  async applyViewport() {
+    const vp = this.#engine.viewport;
+    if (!vp) { await this.send("Emulation.clearDeviceMetricsOverride").catch(() => {}); this.#viewport = null; return; }
+    await this.send("Emulation.setDeviceMetricsOverride", {
+      width: Math.round(vp.w), height: Math.round(vp.h), deviceScaleFactor: vp.dpr ?? 1, mobile: false,
+    });
+    this.#viewport = null;   // re-measure on next use
+  }
+
   /** Input from a human in the live view (normalized coords). Not agent input,
    *  so it does not move the agent's cursor. */
   async userInput(ev) {
@@ -272,8 +308,21 @@ export class Tab {
   // ---------- navigation ----------
   async #waitLoad(timeoutMs = 20000) {
     await new Promise((res) => {
-      const off = this.#engine.cdp.on("Page.loadEventFired", (_, sid) => { if (sid === this.sessionId) { off(); clearTimeout(t); res(); } });
-      const t = setTimeout(() => { off(); res(); }, timeoutMs);
+      let settle, finished = false;
+      const done = () => { if (finished) return; finished = true; offLoad(); offDom(); clearTimeout(t); clearTimeout(settle); clearInterval(poll); res(); };
+      // backup for a missed event: poll readiness directly
+      const started = Date.now();
+      const poll = setInterval(async () => {
+        if (Date.now() - started < 400) return;
+        const r = await this.send("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, 2000).catch(() => null);
+        if (r?.result?.value === "complete") done();
+        else if (r?.result?.value === "interactive" && !settle) settle = setTimeout(done, 700);
+      }, 300);
+      const offLoad = this.#engine.cdp.on("Page.loadEventFired", (_, sid) => { if (sid === this.sessionId) done(); });
+      const offDom = this.#engine.cdp.on("Page.domContentEventFired", (_, sid) => {
+        if (sid === this.sessionId) settle = setTimeout(done, 700);
+      });
+      const t = setTimeout(done, timeoutMs);
     });
   }
   async goto(url) {

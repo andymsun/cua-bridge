@@ -25,13 +25,16 @@ Claude app.
 ## Show the user what you're doing (hybrid Claude + cua)
 
 cua serves a live view of its browser - tab strip, address bar, the agent's own
-cursor, and full take-over (the user can click and type into the page). When doing
-visible browser work in the Claude desktop app, open it in Claude's browser pane:
+cursor, and full take-over. **In the Claude desktop app, always open it in the browser
+sidebar as soon as you start browser work** - that is what makes this feel like
+Codex's in-app browser:
 
-1. `mcp__cua__js` with `cua.ui()` - returns `{ browser, settings }` URLs.
-2. `mcp__Claude_Browser__preview_start` with `url` set to the `browser` URL.
+1. The first `cua.open()` prints `Live view for the user: <url>` (or call `cua.ui()`).
+2. Immediately call `mcp__Claude_Browser__preview_start` with that `url`.
 
-The pane then mirrors whatever tab cua is driving. The floating HUD
+The sidebar then mirrors whichever tab cua is driving, sized to fill the pane. The
+user can click, scroll and type into it directly, which is how they hand you back a
+page or finish a login or CAPTCHA. The floating HUD
 (`~/Applications/CuaPreview.app`) shows the same thing outside the pane.
 
 ## Patterns

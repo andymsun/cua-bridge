@@ -29,6 +29,7 @@ export function makeApiFactory({ engine, native, hud, urls }) {
     });
 
     const opened = new Set();   // tabs this session created; closed at session end unless kept
+    let hinted = false;         // live-view hint goes out once per session
     const wrapTab = (t) => {
       t.keep ??= function () { this.kept = true; return "tab will stay open after this session"; };
       return emitting(t);
@@ -40,6 +41,10 @@ export function makeApiFactory({ engine, native, hud, urls }) {
         const tab = await engine.newTab(url);
         opened.add(tab);
         write(`Opened tab ${tab.id.slice(0, 8)} · ${await tab.title()} · ${await tab.url()}  (call tab.read() for elements)`);
+        if (!hinted) {
+          hinted = true;
+          write(`Live view for the user: ${urls().browser}\nIf your harness has a browser pane or sidebar (Claude app: mcp__Claude_Browser__preview_start with this url), open it there now so the user can watch and take over.`);
+        }
         return wrapTab(tab);
       },
       /** The driven tab (or the tab with this id). */

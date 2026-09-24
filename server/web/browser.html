@@ -29,8 +29,7 @@
   #url:focus { background: var(--pill); text-align: left; }
   .who { font-size: 11px; color: var(--muted); padding: 0 6px; white-space: nowrap; }
   .stage { position: relative; flex: 1; min-height: 0; background: #0f0f0f; outline: none; }
-  #view { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none;
-    -webkit-user-drag: none; }
+  #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #cursor { position: absolute; left: 0; top: 0; width: 22px; height: 22px; pointer-events: none;
     transition: transform .35s cubic-bezier(.2,.8,.2,1), opacity .3s; opacity: 0;
     filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
@@ -54,7 +53,7 @@
   <span class="who" id="who"></span>
 </div>
 <div class="stage" id="stage" tabindex="0">
-  <img id="view" alt="">
+  <canvas id="view"></canvas>
   <div class="empty" id="empty">No page yet — the agent opens tabs here, or type an address above.</div>
   <svg id="cursor" viewBox="0 0 22 22"><path d="M3 2 L3 17 L7 13.2 L9.6 19 L12.2 17.9 L9.7 12.2 L15 12.2 Z"
     fill="#fff" stroke="#111" stroke-width="1.2" stroke-linejoin="round"/></svg>
@@ -63,16 +62,68 @@
 <script>
 const T = "{{TOKEN}}";
 const q = (s) => document.querySelector(s);
-const api = (path, body) => fetch(path + (path.includes("?") ? "&" : "?") + "t=" + T, body ? {
-  method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}).then((r) => r.json());
-const nav = (action, extra = {}) => api("/api/nav", { action, ...extra });
-
 q("#settings").href = "/settings?t=" + T;
-const view = q("#view"), stage = q("#stage"), cursor = q("#cursor");
-view.src = "/stream?t=" + T;
-view.onload = () => (q("#empty").style.display = "none");
+const view = q("#view"), stage = q("#stage"), cursor = q("#cursor"), ctx = view.getContext("2d");
 
-let state = { tabs: [] };
+// ---- one WebSocket: binary frames in; JSON state/cursor in; JSON input/nav/viewport out ----
+let ws, state = { tabs: [] }, frameSize = { w: 1, h: 1 };
+const send = (m) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
+const nav = (action, extra = {}) => send({ type: "nav", action, ...extra });
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws?t=${T}`);
+  ws.binaryType = "blob";
+  ws.onopen = reportViewport;
+  ws.onclose = () => setTimeout(connect, 800);
+  let drawing = false, pending = null;
+  ws.onmessage = async (e) => {
+    if (typeof e.data === "string") {
+      const ev = JSON.parse(e.data);
+      if (ev.type === "state") { state = ev; render(); }
+      if (ev.type === "cursor") showCursor(ev);
+      return;
+    }
+    // draw the newest frame only; if one is still decoding, keep just the latest
+    pending = e.data;
+    if (drawing) return;
+    drawing = true;
+    while (pending) {
+      const blob = pending; pending = null;
+      try {
+        const bmp = await createImageBitmap(blob);
+        frameSize = { w: bmp.width, h: bmp.height };
+        const r = frameRect();
+        ctx.clearRect(0, 0, view.width, view.height);
+        ctx.drawImage(bmp, r.x * dpr(), r.y * dpr(), r.w * dpr(), r.h * dpr());
+        bmp.close();
+        q("#empty").style.display = "none";
+      } catch {}
+    }
+    drawing = false;
+  };
+}
+
+const dpr = () => window.devicePixelRatio || 1;
+// the page renders at exactly the stage size, so aspect-fit fills it; it only letterboxes
+// for a moment while a resize catches up
+function frameRect() {
+  const W = stage.clientWidth, H = stage.clientHeight;
+  const s = Math.min(W / frameSize.w, H / frameSize.h);
+  const w = frameSize.w * s, h = frameSize.h * s;
+  return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+}
+function sizeCanvas() {
+  view.width = Math.round(stage.clientWidth * dpr());
+  view.height = Math.round(stage.clientHeight * dpr());
+}
+let vpTimer;
+function reportViewport() {
+  sizeCanvas();
+  clearTimeout(vpTimer);
+  vpTimer = setTimeout(() => send({ type: "viewport", w: stage.clientWidth, h: stage.clientHeight, dpr: dpr() }), 60);
+}
+new ResizeObserver(reportViewport).observe(stage);
+
 function render() {
   const tabs = q("#tabs");
   tabs.innerHTML = "";
@@ -87,18 +138,13 @@ function render() {
   const active = state.tabs.find((t) => t.active);
   if (document.activeElement !== q("#url")) q("#url").value = active?.url && active.url !== "about:blank" ? active.url : "";
   q("#who").textContent = state.running ? (state.source === "native" ? "agent · native app" : "agent · browser") : "browser idle";
-  q("#empty").style.display = active ? "none" : "grid";
+  if (!active) q("#empty").style.display = "grid";
 }
 
 // the agent's own cursor, drawn over the frame
-function imageRect() {
-  const r = stage.getBoundingClientRect(), nw = view.naturalWidth || 16, nh = view.naturalHeight || 9;
-  const s = Math.min(r.width / nw, r.height / nh), w = nw * s, h = nh * s;
-  return { x: (r.width - w) / 2, y: (r.height - h) / 2, w, h };
-}
 function showCursor(c) {
   if (c.source === "native" || c.app) return;
-  const r = imageRect(), x = r.x + c.x * r.w, y = r.y + c.y * r.h;
+  const r = frameRect(), x = r.x + c.x * r.w, y = r.y + c.y * r.h;
   cursor.style.opacity = 1;
   cursor.style.transform = `translate(${x - 3}px, ${y - 2}px)`;
   if (c.kind === "click") setTimeout(() => {
@@ -107,13 +153,6 @@ function showCursor(c) {
     stage.append(d); setTimeout(() => d.remove(), 600);
   }, 300);
 }
-
-const es = new EventSource("/events?t=" + T);
-es.onmessage = (m) => {
-  const ev = JSON.parse(m.data);
-  if (ev.type === "state") { state = ev; render(); }
-  if (ev.type === "cursor") showCursor(ev);
-};
 
 q("#newTab").onclick = () => nav("new");
 q("#back").onclick = () => nav("back");
@@ -130,21 +169,27 @@ q("#url").onkeydown = (e) => {
 
 // taking over: your input goes to the page itself, never to the OS
 const norm = (e) => {
-  const r = imageRect(), b = stage.getBoundingClientRect();
+  const r = frameRect(), b = stage.getBoundingClientRect();
   return { nx: (e.clientX - b.left - r.x) / r.w, ny: (e.clientY - b.top - r.y) / r.h };
 };
 const mods = (e) => ({ alt: e.altKey, ctrl: e.ctrlKey, meta: e.metaKey, shift: e.shiftKey });
-const input = (ev) => api("/api/input", ev);
-let lastMove = 0;
-stage.addEventListener("mousedown", (e) => { stage.focus(); input({ type: "down", ...norm(e), ...mods(e), clickCount: e.detail || 1, button: ["left", "middle", "right"][e.button] }); e.preventDefault(); });
-stage.addEventListener("mouseup", (e) => input({ type: "up", ...norm(e), ...mods(e), clickCount: e.detail || 1, button: ["left", "middle", "right"][e.button] }));
-stage.addEventListener("mousemove", (e) => { const n = Date.now(); if (n - lastMove > 40) { lastMove = n; input({ type: "move", ...norm(e) }); } });
-stage.addEventListener("wheel", (e) => { input({ type: "wheel", ...norm(e), dx: e.deltaX, dy: e.deltaY }); e.preventDefault(); }, { passive: false });
+const btn = (e) => ["left", "middle", "right"][e.button];
+let moveQueued = null;
+stage.addEventListener("mousedown", (e) => { stage.focus(); send({ type: "down", ...norm(e), ...mods(e), clickCount: e.detail || 1, button: btn(e) }); e.preventDefault(); });
+stage.addEventListener("mouseup", (e) => send({ type: "up", ...norm(e), ...mods(e), clickCount: e.detail || 1, button: btn(e) }));
+stage.addEventListener("mousemove", (e) => {
+  const m = { type: "move", ...norm(e) };
+  if (!moveQueued) requestAnimationFrame(() => { send(moveQueued); moveQueued = null; });
+  moveQueued = m;
+});
+stage.addEventListener("wheel", (e) => { send({ type: "wheel", ...norm(e), dx: e.deltaX, dy: e.deltaY }); e.preventDefault(); }, { passive: false });
 stage.addEventListener("contextmenu", (e) => e.preventDefault());
 stage.addEventListener("keydown", (e) => {
-  if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) input({ type: "text", text: e.key });
-  else input({ type: "key", key: e.key, code: e.code, keyCode: e.keyCode, ...mods(e) });
+  if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) send({ type: "text", text: e.key });
+  else send({ type: "key", key: e.key, code: e.code, keyCode: e.keyCode, ...mods(e) });
   e.preventDefault();
 });
-stage.addEventListener("paste", (e) => { input({ type: "text", text: e.clipboardData.getData("text") }); e.preventDefault(); });
+stage.addEventListener("paste", (e) => { send({ type: "text", text: e.clipboardData.getData("text") }); e.preventDefault(); });
+
+connect();
 </script>

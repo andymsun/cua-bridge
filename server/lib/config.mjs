@@ -26,7 +26,7 @@ export const paths = {
 export const defaults = {
   browser: {
     executable: "auto",          // auto | absolute path to a Chromium-family binary
-    headless: true,              // true = fully in the background, no window
+    headless: true,              // true = fully in the background. false shows a window and Chrome takes focus when it launches
     attach: "",                  // CDP URL of an already-running browser to drive instead
     profile: "default",          // named profile under ~/Library/Application Support/cua/profiles
     viewport: { width: 1280, height: 800 },
@@ -36,7 +36,7 @@ export const defaults = {
   },
   snapshot: { diff: true, maxLines: 500, maxTextLength: 120 },
   native: { enabled: true, allowKeyEvents: true, maxDepth: 30, maxLines: 500 },
-  stream: { fps: 12, quality: 70, maxWidth: 1280 },
+  stream: { fps: 30, quality: 72, maxWidth: 1280 },
   hud: {
     enabled: true,
     mode: "attached",            // attached | overlay | normal
@@ -86,19 +86,46 @@ export function config() {
   return cache.value;
 }
 
+// Values equal to the default are not stored, so improving a default later reaches
+// existing installs instead of being pinned by a copy saved on day one.
+function overrides(base, value) {
+  const out = {};
+  for (const [k, v] of Object.entries(value ?? {})) {
+    const d = base?.[k];
+    if (v && typeof v === "object" && !Array.isArray(v) && d && typeof d === "object") {
+      const sub = overrides(d, v);
+      if (Object.keys(sub).length) out[k] = sub;
+    } else if (JSON.stringify(v) !== JSON.stringify(d)) out[k] = v;
+  }
+  return out;
+}
+
 export function saveConfig(value) {
   fs.mkdirSync(path.dirname(paths.config), { recursive: true });
   const tmp = paths.config + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(merge(defaults, value), null, 2) + "\n");
+  fs.writeFileSync(tmp, JSON.stringify(overrides(defaults, value), null, 2) + "\n");
   fs.renameSync(tmp, paths.config);
+  cache.mtime = 0;
   return config();
+}
+
+// one-time: drop values the first release wrote that equal its old defaults
+const STALE = { stream: { fps: 12, quality: 70 } };
+export function migrateConfig() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(paths.config, "utf8"));
+    for (const [sec, vals] of Object.entries(STALE)) {
+      for (const [k, v] of Object.entries(vals)) if (raw[sec]?.[k] === v) delete raw[sec][k];
+    }
+    saveConfig(merge(defaults, raw));
+  } catch {}
 }
 
 export function ensureDirs() {
   for (const d of [paths.run, paths.profiles, path.dirname(paths.config)]) {
     fs.mkdirSync(d, { recursive: true, mode: 0o700 });
   }
-  if (!fs.existsSync(paths.config)) saveConfig({});
+  if (!fs.existsSync(paths.config)) saveConfig({}); else migrateConfig();
 }
 
 export const expandHome = (p) => (p?.startsWith("~/") ? path.join(home, p.slice(2)) : p);

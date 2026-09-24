@@ -24,8 +24,8 @@
     "maxLines": 500
   },
   "stream": {
-    "fps": 12,
-    "quality": 70,
+    "fps": 30,
+    "quality": 72,
     "maxWidth": 1280
   },
   "hud": {
