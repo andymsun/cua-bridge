@@ -18,7 +18,15 @@ const CANDIDATES = [
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 ];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const EDIT_COMMANDS = { a: "selectAll", c: "copy", v: "paste", x: "cut", z: "undo" };
+// Cmd+A/Z map to editing commands. Cmd+C/X/V go through the browser session's own
+// clipboard instead (see #clipboardKey), so the agent never touches the system one.
+const EDIT_COMMANDS = { a: "selectAll", z: "undo" };
+const MOUSE = { left: "left", l: "left", 1: "left", right: "right", r: "right", 3: "right", middle: "middle", m: "middle", 2: "middle", back: "back", 4: "back", forward: "forward", 5: "forward" };
+// current selection's text in the focused field or document
+const SELECTION_JS = `(() => { const a = document.activeElement;
+  if (a && (a instanceof HTMLInputElement || a instanceof HTMLTextAreaElement) && a.selectionStart !== null)
+    return a.value.slice(a.selectionStart, a.selectionEnd);
+  return String(getSelection() ?? ""); })()`;
 
 export function findExecutable() {
   const cfg = config().browser.executable;
@@ -37,6 +45,13 @@ export class BrowserEngine {
   #streamingTab = null;
   consumers = 0;             // live-view clients + HUD; screencast runs only when > 0
   viewport = null;           // { w, h, dpr } requested by the live view; null = config viewport
+  explicitViewport = null;   // set by the agent (viewport capability); wins over the live view
+  wsUrl = null;              // browser-level CDP endpoint, shared with the Playwright bridge
+  clipboard = [];            // the browser session's own clipboard - never the system one
+  sessions = new Map();      // CDP sessionId -> Tab
+  cursorSeq = 0;             // agent cursor moves, so viewers can report when one has arrived
+  animatedViewers = 0;       // live views that animate the cursor and report arrival
+  #arrivals = new Map();
 
   constructor(hooks = {}) { this.hooks = hooks; }
 
@@ -60,6 +75,8 @@ export class BrowserEngine {
       wsUrl = await this.#reuse(profile) ?? await this.#launch(profile, cfg);
     }
     this.cdp = await CDP.connect(wsUrl);
+    this.wsUrl = wsUrl;
+    this.cdp.onAny((method, params, sid) => this.sessions.get(sid)?.recordEvent(method, params));
     this.cdp.on("__close", () => { this.tabs.clear(); this.active = null; this.hooks.onClosed?.(); });
     this.cdp.on("Target.targetCreated", ({ targetInfo: t }) => this.#onCreated(t));
     this.cdp.on("Target.targetDestroyed", ({ targetId }) => this.#onDestroyed(targetId));
@@ -125,6 +142,7 @@ export class BrowserEngine {
     const tab = new Tab(this, info, sessionId);
     tab.ready = tab.init();            // callers await this before driving the tab
     this.tabs.set(info.targetId, tab);
+    this.sessions.set(sessionId, tab);
     await tab.ready;
     this.hooks.onTabs?.();
     return tab;
@@ -141,6 +159,8 @@ export class BrowserEngine {
     const tab = this.tabs.get(targetId);
     if (!tab) return;
     this.tabs.delete(targetId);
+    this.sessions.delete(tab.sessionId);
+    tab.closed = true;
     if (this.active === tab) this.setActive([...this.tabs.values()].pop() ?? null);
     if (this.#streamingTab === tab) this.#streamingTab = null;
     this.hooks.onTabs?.();
@@ -165,6 +185,33 @@ export class BrowserEngine {
     await this.syncStreaming(true);
   }
 
+  /** The size pages render at: the agent's explicit override, else the live view's. */
+  get effectiveViewport() {
+    const e = this.explicitViewport;
+    return e ? { w: e.w, h: e.h, dpr: e.dpr ?? this.viewport?.dpr ?? 1 } : this.viewport;
+  }
+
+  async setExplicitViewport(vp) {
+    this.explicitViewport = vp;
+    await this.active?.applyViewport().catch(() => {});
+    await this.syncStreaming(true);
+  }
+
+  /** Announce an agent cursor move; resolves once a live view has animated it there. */
+  moveCursor(c) {
+    const seq = ++this.cursorSeq;
+    this.hooks.onCursor?.({ ...c, seq });
+    if (!this.animatedViewers) return Promise.resolve();
+    return new Promise((res) => {
+      const t = setTimeout(() => { this.#arrivals.delete(seq); res(); }, c.kind === "move" ? 450 : 900);
+      this.#arrivals.set(seq, () => { clearTimeout(t); this.#arrivals.delete(seq); res(); });
+    });
+  }
+  cursorArrived(seq) {
+    // arriving at a later move implies the earlier ones are done too
+    for (const [s, done] of this.#arrivals) if (s <= seq) done();
+  }
+
   async syncStreaming(restart = false) {
     const want = this.consumers > 0 ? this.active : null;
     if (this.#streamingTab === want && !restart) return;
@@ -173,7 +220,7 @@ export class BrowserEngine {
     if (prev) await prev.send("Page.stopScreencast").catch(() => {});
     if (want) {
       const s = config().stream;
-      const vp = this.viewport, dpr = vp?.dpr ?? 1;
+      const vp = this.effectiveViewport, dpr = vp?.dpr ?? 1;
       await want.send("Page.startScreencast", {
         format: "jpeg", quality: s.quality,
         maxWidth: Math.round(vp ? vp.w * dpr : s.maxWidth),
@@ -189,7 +236,7 @@ export class BrowserEngine {
     }));
   }
 
-  async newTab(url = "about:blank") {
+  async newTab(url = "about:blank", { activate = true } = {}) {
     await this.ensure();
     const headless = config().browser.headless;
     const create = (newWindow) => this.cdp.send("Target.createTarget", { url: "about:blank", background: true, newWindow });
@@ -201,8 +248,8 @@ export class BrowserEngine {
     for (let i = 0; i < 50 && !this.tabs.has(targetId); i++) await sleep(20);
     const tab = this.tabs.get(targetId) ?? await this.#attach({ targetId, type: "page", title: "", url: "about:blank" });
     await tab.ready;
-    this.setActive(tab);
-    if (url && url !== "about:blank") await tab.goto(url);
+    if (activate) this.setActive(tab);
+    if (url && url !== "about:blank") await tab.goto(url, { activate });
     return tab;
   }
 
@@ -224,6 +271,7 @@ export class BrowserEngine {
 export class Tab {
   #engine; #refs = new Map(); #baseline = null; #baselineUrl = null;
   logs = []; requests = []; dialog = null; cursor = null; #viewport = null;
+  events = []; eventSeq = 0; closed = false; lastActionAt = 0; kept = false;
 
   constructor(engine, info, sessionId) {
     this.#engine = engine; this.info = info; this.sessionId = sessionId;
@@ -258,14 +306,21 @@ export class Tab {
     });
     on("Page.javascriptDialogClosed", () => { this.dialog = null; });
     await Promise.all([
+      this.send("Page.addScriptToEvaluateOnNewDocument", { source: WEBMCP_JS }),
+      this.send("Runtime.evaluate", { expression: WEBMCP_JS }),
       this.send("Page.enable"), this.send("Runtime.enable"), this.send("DOM.enable"),
       this.send("Accessibility.enable"), this.send("Log.enable"), this.send("Network.enable"),
       this.send("Emulation.setFocusEmulationEnabled", { enabled: true }),
     ].map((p) => p.catch(() => {})));
   }
 
-  #log(level, message) {
-    this.logs.push({ level, message: String(message ?? ""), t: new Date().toISOString() });
+  recordEvent(method, params) {
+    this.events.push({ method, params, sequence: ++this.eventSeq, source: { targetId: this.id, sessionId: this.sessionId } });
+    if (this.events.length > 2000) this.events.shift();
+  }
+
+  #log(level, message, url) {
+    this.logs.push({ level, message: String(message ?? ""), t: new Date().toISOString(), url });
     if (this.logs.length > 300) this.logs.shift();
   }
   #req(patch) {
@@ -279,7 +334,7 @@ export class Tab {
   async viewportSize() { return this.#viewport ?? this.#viewportSize(); }
 
   async applyViewport() {
-    const vp = this.#engine.viewport;
+    const vp = this.#engine.effectiveViewport;
     if (!vp) { await this.send("Emulation.clearDeviceMetricsOverride").catch(() => {}); this.#viewport = null; return; }
     await this.send("Emulation.setDeviceMetricsOverride", {
       width: Math.round(vp.w), height: Math.round(vp.h), deviceScaleFactor: vp.dpr ?? 1, mobile: false,
@@ -328,8 +383,8 @@ export class Tab {
       const t = setTimeout(done, timeoutMs);
     });
   }
-  async goto(url) {
-    this.#touch();
+  async goto(url, { activate = true } = {}) {
+    if (activate) this.#touch();
     if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = "https://" + url;
     const wait = this.#waitLoad();
     const r = await this.send("Page.navigate", { url });
@@ -351,23 +406,39 @@ export class Tab {
   back() { return this.#history(-1); }
   forward() { return this.#history(1); }
   async reload() { this.#touch(); const w = this.#waitLoad(); await this.send("Page.reload"); await w; return this.url(); }
-  async close() { await this.#engine.cdp.send("Target.closeTarget", { targetId: this.id }); }
+  async close() { this.closed = true; await this.#engine.cdp.send("Target.closeTarget", { targetId: this.id }); }
   async url() { return (await this.evaluate("location.href")) ?? this.info.url; }
   async title() { return (await this.evaluate("document.title")) ?? this.info.title; }
 
   // ---------- reading ----------
-  async #snapshot() {
-    const { nodes } = await this.send("Accessibility.getFullAXTree", {});
-    return fromCdpAx(nodes, { maxTextLength: config().snapshot.maxTextLength });
+  async #snapshot(frameId, level = 0) {
+    const { nodes } = await this.send("Accessibility.getFullAXTree", frameId ? { frameId } : {});
+    const snap = fromCdpAx(nodes, { maxTextLength: config().snapshot.maxTextLength });
+    if (level > 3) return snap;
+    // splice each same-process iframe's tree in after its owner
+    const entries = [];
+    for (const e of snap.entries) {
+      entries.push(e);
+      if (!e.frameOwner) continue;
+      const owner = await this.send("DOM.describeNode", { backendNodeId: e.frameOwner }).catch(() => null);
+      const child = owner?.node?.frameId && await this.#snapshot(owner.node.frameId, level + 1).catch(() => null);
+      if (child?.entries.length) {
+        for (const c of child.entries) entries.push({ ...c, indent: c.indent + e.indent + 1 });
+      } else {
+        entries.push({ indent: e.indent + 1, text: "(cross-origin frame - read it with tab.dom_cua.get_visible_dom() or tab.playwright.frameLocator())", ref: undefined });
+      }
+    }
+    return { entries, focused: snap.focused === null ? null : entries.indexOf(snap.entries[snap.focused]) };
   }
 
   /** Indexed accessibility view. Diff vs the previous read by default. */
   async read({ full = false } = {}) {
     this.#touch();
+    await this.settle();
     const cfg = config().snapshot;
     const { entries, focused } = await this.#snapshot();
     const url = await this.url();
-    const header = `Tab ${this.id.slice(0, 8)} · ${await this.title()} · ${url}`;
+    const header = `Tab ${this.id.slice(0, 8)} · ${await this.title()} · ${shortUrl(url)}`;
     const rendered = render(entries, { maxLines: cfg.maxLines, header, focused });
     this.#refs = rendered.refs;
     const d = !full && cfg.diff && this.#baselineUrl === url ? diff(this.#baseline, entries, cfg) : null;
@@ -387,8 +458,15 @@ export class Tab {
 
   async text() { return this.evaluate("document.body?.innerText ?? ''"); }
 
-  async screenshot({ fullPage = false, format = "png", quality } = {}) {
-    const { data } = await this.send("Page.captureScreenshot", { format, quality, captureBeyondViewport: fullPage });
+  async screenshot({ fullPage = false, format = "png", quality, clip } = {}) {
+    await this.settle();
+    const params = { format, quality, captureBeyondViewport: fullPage };
+    if (clip) params.clip = { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 };
+    else if (fullPage) {
+      const m = await this.send("Page.getLayoutMetrics");
+      params.clip = { x: 0, y: 0, width: m.cssContentSize.width, height: m.cssContentSize.height, scale: 1 };
+    }
+    const { data } = await this.send("Page.captureScreenshot", params);
     return Buffer.from(data, "base64");
   }
 
@@ -429,10 +507,26 @@ export class Tab {
     return this.#viewport;
   }
 
-  async #moveCursor(p, kind) {
+  /** Show the agent cursor at a point (CSS px) without acting. */
+  showCursor(p, kind = "move", label) { this.#touch(); return this.#moveCursor(p, kind, label); }
+
+  async #moveCursor(p, kind, label) {
     this.cursor = { ...p, kind };
+    this.lastActionAt = Date.now();
     const vp = this.#viewport ?? await this.#viewportSize();
-    this.#engine.hooks.onCursor?.({ x: p.x / vp.w, y: p.y / vp.h, kind, tab: this.id });
+    await this.#engine.moveCursor({ x: p.x / vp.w, y: p.y / vp.h, kind, label, tab: this.id });
+  }
+
+  /** Give the page a moment to react to the last action before it's read again. */
+  async settle() {
+    const since = Date.now() - this.lastActionAt;
+    if (since > 1500) return;
+    if (since < 350) await sleep(350 - since);
+    for (let i = 0; i < 12; i++) {
+      const state = await this.send("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, 1500).catch(() => null);
+      if (state?.result?.value !== "loading") break;
+      await sleep(250);
+    }
   }
 
   // ---------- acting ----------
@@ -493,6 +587,7 @@ export class Tab {
     this.#touch();
     await this.#focus(target);
     const k = parseCombo(combo);
+    if (await this.#clipboardKey(k)) return;
     const cmd = k.modifiers & 4 && EDIT_COMMANDS[k.key.toLowerCase()];
     const base = { key: k.key, code: k.code, windowsVirtualKeyCode: k.windowsVirtualKeyCode, modifiers: k.modifiers };
     await this.send("Input.dispatchKeyEvent", {
@@ -540,6 +635,160 @@ export class Tab {
     this.dialog = null;
   }
 
+  // ---------- clipboard (the browser session's own, never the system's) ----------
+  async #clipboardKey(k) {
+    if (!(k.modifiers & 6) || k.modifiers & 1) return false;           // Cmd or Ctrl, no Alt
+    const key = k.key.toLowerCase();
+    if (key === "c" || key === "x") {
+      const text = await this.evaluate(SELECTION_JS).catch(() => "");
+      if (text) this.#engine.clipboard = [{ entries: [{ mimeType: "text/plain", text }] }];
+      if (key === "x" && text) await this.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Delete", code: "Delete", windowsVirtualKeyCode: 46, commands: ["deleteBackward"] })
+        .then(() => this.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 }));
+      return true;
+    }
+    if (key === "v") {
+      const entries = this.#engine.clipboard[0]?.entries ?? [];
+      const html = entries.find((e) => e.mimeType === "text/html")?.text;
+      const text = entries.find((e) => e.mimeType === "text/plain")?.text ?? "";
+      await this.paste(null, html ?? text, { format: html ? "html" : "text" });
+      return true;
+    }
+    return false;
+  }
+
+  /** Paste like a user would: a real paste event (so editors handle it), falling back to insertion. */
+  async paste(target, content, { format = "text" } = {}) {
+    this.#touch();
+    await this.#focus(target);
+    const html = format === "html" ? String(content) : format === "md" ? mdToHtml(String(content)) : null;
+    const text = format === "text" ? String(content) : htmlToText(html);
+    const handled = await this.evaluate(`(() => {
+      const dt = new DataTransfer(); dt.setData("text/plain", ${JSON.stringify(text)});
+      ${html ? `dt.setData("text/html", ${JSON.stringify(html)});` : ""}
+      const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+      return !(document.activeElement ?? document.body).dispatchEvent(ev);
+    })()`).catch(() => false);
+    if (handled) return;
+    if (html && await this.evaluate(`document.activeElement?.isContentEditable === true`).catch(() => false)) {
+      await this.evaluate(`document.execCommand("insertHTML", false, ${JSON.stringify(html)})`);
+    } else {
+      await this.send("Input.insertText", { text });
+    }
+  }
+
+  // ---------- point actions (screenshot / viewport coordinates) ----------
+  async #mods(keys = []) {
+    let m = 0;
+    for (const k of [].concat(keys)) {
+      const n = String(k).toLowerCase();
+      if (/^(alt|option)$/.test(n)) m |= 1;
+      else if (/^(ctrl|control)$/.test(n)) m |= 2;
+      else if (/^(meta|cmd|command|super|win|controlormeta)$/.test(n)) m |= 4;
+      else if (n === "shift") m |= 8;
+    }
+    return m;
+  }
+
+  async clickAt({ x, y }, { button = "left", clickCount = 1, keys = [] } = {}) {
+    this.#touch();
+    const p = { x, y }, b = MOUSE[button] ?? "left", modifiers = await this.#mods(keys);
+    await this.#moveCursor(p, "click");
+    await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...p, modifiers });
+    for (let i = 1; i <= clickCount; i++) {
+      await this.send("Input.dispatchMouseEvent", { type: "mousePressed", ...p, button: b, clickCount: i, buttons: 1, modifiers });
+      await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...p, button: b, clickCount: i, modifiers });
+    }
+  }
+
+  async moveTo({ x, y }, { keys = [] } = {}) {
+    this.#touch();
+    await this.#moveCursor({ x, y }, "move");
+    await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, modifiers: await this.#mods(keys) });
+  }
+
+  async wheelAt({ x, y }, dx, dy, { keys = [] } = {}) {
+    this.#touch();
+    await this.#moveCursor({ x, y }, "scroll");
+    await this.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: dx, deltaY: dy, modifiers: await this.#mods(keys) });
+    await sleep(120);
+  }
+
+  async dragPath(points, { keys = [] } = {}) {
+    this.#touch();
+    if (points.length < 2) throw new Error("drag needs at least two points");
+    const modifiers = await this.#mods(keys);
+    const [a, ...rest] = points, b = rest[rest.length - 1];
+    await this.#moveCursor(a, "move");
+    await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...a, modifiers });
+    await this.send("Input.dispatchMouseEvent", { type: "mousePressed", ...a, button: "left", clickCount: 1, buttons: 1, modifiers });
+    let prev = a;
+    for (const p of rest) {             // interpolate so drag handlers see a continuous motion
+      const steps = Math.max(1, Math.round(Math.hypot(p.x - prev.x, p.y - prev.y) / 25));
+      for (let i = 1; i <= steps; i++) {
+        await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prev.x + (p.x - prev.x) * i / steps, y: prev.y + (p.y - prev.y) * i / steps, buttons: 1, modifiers });
+      }
+      prev = p;
+    }
+    await this.#moveCursor(b, "click");
+    await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...b, button: "left", clickCount: 1, modifiers });
+  }
+
+  /** Select `text` inside an editable element, or place the caret before/after it. */
+  async selectText(target, text, { prefix = "", suffix = "", selectionType = "text" } = {}) {
+    this.#touch();
+    const backendNodeId = await this.#backendId(target);
+    const { object } = await this.send("DOM.resolveNode", { backendNodeId });
+    const r = await this.send("Runtime.callFunctionOn", {
+      objectId: object.objectId, returnByValue: true,
+      arguments: [{ value: String(text) }, { value: prefix }, { value: suffix }, { value: selectionType }],
+      functionDeclaration: `function (text, prefix, suffix, type) {
+        const field = this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement;
+        const hay = field ? this.value : this.innerText;
+        const at = hay.indexOf(prefix + text + suffix);
+        if (at === -1) return "not found";
+        const start = at + prefix.length, end = start + text.length;
+        const [s, e] = type === "cursor_before" ? [start, start] : type === "cursor_after" ? [end, end] : [start, end];
+        this.focus();
+        if (field) { this.setSelectionRange(s, e); return "ok"; }
+        const walker = document.createTreeWalker(this, NodeFilter.SHOW_TEXT);
+        let pos = 0, n, range = document.createRange(), setStart = false;
+        while ((n = walker.nextNode())) {
+          const len = n.data.length;
+          if (!setStart && s <= pos + len) { range.setStart(n, s - pos); setStart = true; }
+          if (setStart && e <= pos + len) { range.setEnd(n, e - pos); break; }
+          pos += len;
+        }
+        const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        return "ok";
+      }`,
+    });
+    if (r.result?.value !== "ok") throw new Error(`"${text}" not found in element ${target}`);
+    const p = await this.#point(target).catch(() => null);
+    if (p) await this.#moveCursor(p, "move");
+  }
+
+  /** Accessibility actions beyond a plain click. */
+  async secondaryAction(target, action) {
+    const a = String(action).toLowerCase().replace(/^ax/, "").replace(/[\s_-]/g, "");
+    if (a === "press" || a === "click") return this.click(target);
+    if (a === "expand" || a === "collapse") {
+      const backendNodeId = await this.#backendId(target);
+      const { object } = await this.send("DOM.resolveNode", { backendNodeId });
+      const r = await this.send("Runtime.callFunctionOn", { objectId: object.objectId, returnByValue: true,
+        functionDeclaration: `function () { const e = this.closest("[aria-expanded]") ?? this; return e.getAttribute("aria-expanded") ?? (this.open === undefined ? null : String(this.open)); }` });
+      const expanded = r.result?.value === "true";
+      if ((a === "expand") !== expanded) return this.click(target);
+      return;
+    }
+    if (a === "showmenu" || a === "contextmenu") return this.click(target, { button: "right" });
+    if (a === "focus") return this.#focus(target);
+    if (a === "scrolltovisible" || a === "scrollintoview") { const backendNodeId = await this.#backendId(target); await this.send("DOM.scrollIntoViewIfNeeded", { backendNodeId }); return; }
+    if (a === "increment") return this.pressKey(target, "Up");
+    if (a === "decrement") return this.pressKey(target, "Down");
+    if (a === "cancel" || a === "dismiss") return this.pressKey(target, "Escape");
+    throw new Error(`Action "${action}" isn't available on element ${target}. Supported: Expand, Collapse, ShowMenu, Focus, ScrollIntoView, Increment, Decrement, Cancel.`);
+  }
+
   // ---------- scripting ----------
   /** Evaluate against the LIVE page (typed values included). */
   async evaluate(fnOrExpr, arg) {
@@ -565,4 +814,55 @@ export class Tab {
   cdp(method, params) { return this.send(method, params); }
   getLogs({ level, limit = 50 } = {}) { return this.logs.filter((l) => !level || l.level === level).slice(-limit); }
   getRequests({ filter, limit = 50 } = {}) { return this.requests.filter((r) => !filter || r.url?.includes(filter)).slice(-limit); }
+}
+
+// WebMCP: pages register tools with navigator.modelContext; keep a registry the
+// agent can list and invoke. Where the browser has no native support, provide it.
+const WEBMCP_JS = `(() => {
+  if (window.__cuaWebMcp) return;
+  const tools = new Map();
+  const registry = {
+    list: () => [...tools.values()].map((t) => ({ name: t.name, description: t.description ?? "", inputSchema: t.inputSchema ?? null })),
+    invoke: async (name, args) => {
+      const tool = tools.get(name);
+      if (!tool) throw new Error("No WebMCP tool named " + name);
+      const r = await tool.execute(args ?? {}, { requestUserInteraction: async (cb) => cb() });
+      try { return JSON.parse(JSON.stringify(r ?? null)); } catch { return String(r); }
+    },
+  };
+  Object.defineProperty(window, "__cuaWebMcp", { value: registry });
+  const hook = (mc) => {
+    const reg = mc.registerTool?.bind(mc), unreg = mc.unregisterTool?.bind(mc), provide = mc.provideContext?.bind(mc), clear = mc.clearContext?.bind(mc);
+    mc.registerTool = (t) => { tools.set(t.name, t); return reg?.(t); };
+    mc.unregisterTool = (n) => { tools.delete(typeof n === "string" ? n : n?.name); return unreg?.(n); };
+    mc.provideContext = (ctx) => { tools.clear(); for (const t of ctx?.tools ?? []) tools.set(t.name, t); return provide?.(ctx); };
+    mc.clearContext = () => { tools.clear(); return clear?.(); };
+  };
+  try {
+    if (navigator.modelContext) hook(navigator.modelContext);
+    else { const mc = {}; hook(mc); Object.defineProperty(Navigator.prototype, "modelContext", { get: () => mc, configurable: true }); }
+  } catch {}
+})()`;
+
+export const shortUrl = (u) => (String(u).length > 160 ? String(u).slice(0, 150) + "…" : String(u));
+
+// minimal conversions for paste(): enough for editors that read text/html or text/plain
+function htmlToText(html) {
+  return String(html ?? "").replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|li|h\d)>/gi, "\n").replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
+}
+function mdToHtml(md) {
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/\*(.+?)\*/g, "<em>$1</em>")
+    .replace(/`(.+?)`/g, "<code>$1</code>").replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2">$1</a>');
+  const out = []; let list = null;
+  for (const line of md.split(/\r?\n/)) {
+    const h = line.match(/^(#{1,6})\s+(.*)/), li = line.match(/^\s*([-*]|\d+\.)\s+(.*)/);
+    if (li) { const t = /\d/.test(li[1]) ? "ol" : "ul"; if (list !== t) { if (list) out.push(`</${list}>`); out.push(`<${t}>`); list = t; } out.push(`<li>${inline(li[2])}</li>`); continue; }
+    if (list) { out.push(`</${list}>`); list = null; }
+    if (h) out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`);
+    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join("");
 }

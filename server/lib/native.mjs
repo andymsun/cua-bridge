@@ -121,17 +121,30 @@ export class App {
   }
 
   async #act(cmd, args, kind) {
-    const r = await this.#client.req(cmd, { pid: this.pid, generation: this.#gen, ...args });
+    this.lastActionAt = Date.now();
+    const r = await this.#client.req(cmd, { pid: this.pid, generation: this.#gen, ...args }).catch((e) => {
+      if (/unknown command/.test(e.message)) {
+        throw new Error("This needs the updated CuaAgent: run ~/.local/share/cua-bridge/install.sh, then turn CuaAgent back on in System Settings > Privacy & Security > Accessibility and Screen Recording.");
+      }
+      throw e;
+    });
     this.#touch(r?.center, kind);
     return r?.result;
   }
 
-  // element index -> AX press; [x, y] (window points) -> AX hit-test, then press
-  click(target) {
+  // element index -> AX press; [x, y] (window points) -> AX hit-test, then press.
+  // button "right" shows the element's menu; count 2 opens it.
+  click(target, { button = "left", count = 1 } = {}) {
+    const extra = button === "left" && count === 1 ? {} : { button, count };
     return Array.isArray(target)
-      ? this.#act("pressAt", { x: target[0], y: target[1] }, "click")
-      : this.#act("press", { index: target }, "click");
+      ? this.#act("pressAt", { x: target[0], y: target[1], ...extra }, "click")
+      : this.#act("press", { index: target, ...extra }, "click");
   }
+  scrollAt(x, y, direction = "down", pages = 1) { return this.#act("scrollAt", { x, y, direction, pages }, "scroll"); }
+  selectText(index, text, { prefix = "", suffix = "", selectionType = "text" } = {}) {
+    return this.#act("selectText", { index, text: String(text), prefix, suffix, selectionType }, "move");
+  }
+  drag(from, to) { return this.#act("drag", { fromX: from[0], fromY: from[1], toX: to[0], toY: to[1] }, "click"); }
   setValue(index, value) { return this.#act("setValue", { index, value: String(value) }, "move"); }
   focus(index) { return this.#act("focus", { index }, "move"); }
   action(index, name) { return this.#act("action", { index, name }, "click"); }

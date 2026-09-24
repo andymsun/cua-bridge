@@ -17,6 +17,7 @@ say() { printf '  %s\n' "$*"; }
 NODE="$(command -v node || true)"
 [ -n "$NODE" ] || { echo "Node.js 22+ is required (brew install node)."; exit 1; }
 [ "$("$NODE" -p 'process.versions.node.split(".")[0]')" -ge 22 ] || { echo "Node.js 22+ is required (found $("$NODE" -v))."; exit 1; }
+command -v npm >/dev/null || { echo "npm is required (it ships with Node.js)."; exit 1; }
 command -v swiftc >/dev/null || { echo "Xcode command line tools required: xcode-select --install"; exit 1; }
 
 echo "==> native apps"
@@ -51,6 +52,9 @@ PLIST
 }
 mkapp CuaAgent "$REPO/agent/CuaAgent.swift" com.andymsun.cua.agent
 mkapp CuaPreview "$REPO/hud/CuaPreview.swift" com.andymsun.cua.preview
+
+echo "==> dependencies"
+( cd "$REPO" && npm install --omit=dev --no-audit --no-fund --silent ) && say "playwright-core (locators run on cua's own browser; no browser download)"
 
 echo "==> config"
 "$NODE" --input-type=module -e "import { ensureDirs, paths } from '$REPO/server/lib/config.mjs'; ensureDirs(); console.log('  ' + paths.config);"

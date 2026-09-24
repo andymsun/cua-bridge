@@ -29,7 +29,7 @@ cursor, and full take-over. **In the Claude desktop app, always open it in the b
 sidebar as soon as you start browser work** - that is what makes this feel like
 Codex's in-app browser:
 
-1. The first `cua.open()` prints `Live view for the user: <url>` (or call `cua.ui()`).
+1. The first new tab prints `Live view for the user: <url>` (or call `cua.ui()`).
 2. Immediately call `mcp__Claude_Browser__preview_start` with that `url`.
 
 The sidebar then mirrors whichever tab cua is driving, sized to fill the pane. The
@@ -39,34 +39,37 @@ page or finish a login or CAPTCHA. The floating HUD
 
 ## Patterns
 
+The API matches the ChatGPT app's browser and computer use, so the same habits apply.
+
 ```js
 // open, inspect, act, verify - one call
-const tab = await cua.open("https://news.ycombinator.com");
-const titles = await tab.evaluate(() => [...document.querySelectorAll(".titleline > a")].slice(0, 5).map(a => a.textContent));
-write(titles);
+const browser = await agent.browsers.getDefault();
+const tab = await browser.tabs.new();
+await tab.goto("https://news.ycombinator.com");
+await tab.ax.write();
 ```
 
 ```js
-// fill a form by index, then check the result
-await tab.read();
-await tab.setValue(4, "Ada Lovelace");
-await tab.click(9);
-await tab.read();             // diff shows what changed
+// forms and repetitive work: Playwright locators
+await tab.playwright.getByLabel("Email").fill("ada@example.com");
+await tab.playwright.getByRole("button", { name: "Continue" }).click();
+await tab.ax.write();                       // diff shows what changed
 ```
 
 ```js
 // native app
-const notes = await cua.app("Notes");
-await notes.read();
+const s = await sky.get_app_state({ app: "Notes" });
+s.text;
 ```
 
-- `tab.evaluate` sees the live DOM, including values typed into fields.
-- Tabs you open close when the session ends. `tab.keep()` for anything the user
+- `browser.documentation()` has the full guide; `agent.documentation.get("computer-use")`
+  covers apps.
+- `tab.playwright.evaluate` sees the live DOM, including values typed into fields.
+- Tabs you open close when the session ends. `tab.markDeliverable()` for anything the user
   should find afterwards.
-- If a site blocks the browser or shows a CAPTCHA or other human check, don't try
-  to get around it. Tell the user and let them finish it in the live view, or leave
-  that site to them. Don't turn `browser.headless` off: Chrome takes focus when it
-  launches.
+- If a site blocks the browser or shows a CAPTCHA or other human check, don't try to get
+  around it. Tell the user and let them finish it in the live view, or leave that site to
+  them. Don't turn `browser.headless` off: Chrome takes focus when it launches.
 
 ## Confirm before
 

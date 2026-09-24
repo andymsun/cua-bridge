@@ -9,7 +9,7 @@
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-black?logo=apple">
   <img alt="Node 22+" src="https://img.shields.io/badge/node-22%2B-339933?logo=node.js&logoColor=white">
   <img alt="MCP" src="https://img.shields.io/badge/MCP-stdio-6e56cf">
-  <img alt="Zero dependencies" src="https://img.shields.io/badge/npm%20dependencies-0-blue">
+  <img alt="One dependency" src="https://img.shields.io/badge/npm%20dependencies-1%20(playwright--core)-blue">
 </p>
 
 <p align="center">
@@ -21,10 +21,12 @@ browser and in native macOS apps **entirely in the background**. Your mouse and 
 stay yours, and your windows don't jump to the front. You watch it work in a live view
 that fits in a sidebar or a floating HUD, and you can take over at any moment.
 
-It is an independent reimplementation of the ideas that make Codex's computer use feel
-good, built only on public APIs (Chrome DevTools Protocol, macOS Accessibility,
-ScreenCaptureKit). It does not use or ship any part of the Codex runtime, and it needs no
-npm packages.
+It speaks the same API as the ChatGPT app's in-app browser (`agent` / `browser` / `tab`
+with `ax`, `playwright`, `dom_cua`, `cua` and capabilities) and its computer use (`sky`),
+so code and habits written for Codex work unchanged, from any model and any harness. It is
+an independent reimplementation on public APIs (Chrome DevTools Protocol, macOS
+Accessibility, ScreenCaptureKit, Playwright): no Codex or ChatGPT code or assets are used or
+shipped.
 
 ## Contents
 
@@ -46,6 +48,11 @@ npm packages.
 
 ## Highlights
 
+- **The ChatGPT app's API, anywhere.** Accessibility-indexed actions, Playwright locators
+  (frames, roles, actionability waits), a visible-DOM view with node ids, coordinate
+  actions, dialogs, downloads, file choosers, the browser's own clipboard, page exports
+  (Markdown, Google Docs/Sheets/Slides, YouTube transcripts), raw CDP with event paging, page
+  asset bundling, WebMCP tools, and `sky` for native apps.
 - **One tool, a real REPL.** The agent gets a single `js` tool backed by a persistent
   JavaScript session. `const tab = …` survives between calls, and loops, retries and
   conditionals run in one round trip instead of one tool call per click.
@@ -54,8 +61,10 @@ npm packages.
 - **Never touches your cursor.** Browser input goes to the page through CDP. Native apps
   are driven through Accessibility actions, and key events go to one process only.
   Nothing moves the system pointer or types into whatever you're using.
-- **Its own cursor.** An agent cursor with click ripples is drawn in the live view and the
-  HUD, so you can see what it's pointing at.
+- **Its own cursor.** A rounded, glowing arrowhead that moves on springs: long moves curve
+  and turn along their heading, short ones scoot, and it settles with a small wiggle. Actions
+  wait for it to arrive, so what you see is what the agent does. Same motion in the live
+  view and the HUD.
 - **Live view you can take over.** A Codex-style browser UI (tabs, address bar, back and
   forward) streams the tab the agent is driving at up to 60 fps. The page is rendered at
   the pane's exact size, so it fills the pane. Clicks, scrolling and typing in the view go
@@ -143,66 +152,64 @@ cua is a plain MCP stdio server. Anything that can launch one can use it:
 
 ## Using it
 
-The agent calls one tool, `js`, with JavaScript. A typical call opens a page, acts and
-checks the result in one go:
+The agent calls one tool, `js`, with JavaScript. `agent`, `sky` and `nodeRepl` are ready in
+every session, top-level `const` persists between calls, and the last expression is
+returned:
 
 ```js
-const tab = await cua.open("https://en.wikipedia.org/wiki/Special:Search");
-await tab.find("searchbox");          // matching lines with fresh indices
-await tab.typeText(22, "Engelbart");
-await tab.pressKey(null, "Return");
-await tab.waitFor("Douglas Engelbart");
-await tab.read();
+const browser = await agent.browsers.getDefault();
+const tab = await browser.tabs.new();
+await tab.goto("https://en.wikipedia.org/wiki/Special:Search");
+await tab.ax.write();
 ```
-
-What the agent sees back:
 
 ```text
-Opened tab 4676D09C · Search - Wikipedia · https://en.wikipedia.org/wiki/Special:Search
-Live view for the user: http://127.0.0.1:47821/?t=…
-22 searchbox (focused)
-23 button "Search"
-Tab 4676D09C · Engelbart - Search results - Wikipedia · https://en.wikipedia.org/w/index.php?search=Engelbart…
-26 link "Search"
-27 searchbox "Search Wikipedia"
+Tab 9C4CE163 · Search - Wikipedia · https://en.wikipedia.org/wiki/Special:Search
+1 link "Jump to content"
 …
-40 heading "Search results" h1
-63 searchbox value="Engelbart"
-64 button "Search"
+7 searchbox "Search Wikipedia"
+8 button "Search"
 …
 ```
 
-Later `read()` calls return only the lines that changed. When most of the page changed,
-they return the full tree instead.
-
-Native apps use the same model:
+Act by index, or with Playwright locators for forms and repetitive work, then read again.
+Later reads return only what changed:
 
 ```js
-const notes = await cua.app("Notes");   // name or bundle id
-await notes.read();
-await notes.click(7);                   // Accessibility press, not a mouse click
-await notes.typeText(4, "groceries");
+await tab.playwright.getByRole("searchbox", { name: "Search Wikipedia" }).fill("Engelbart");
+await tab.ax.pressKey(null, "Return");
+await tab.ax.write();      // (changes since last read: +38 −4, …)
 ```
+
+Native apps work the same way:
+
+```js
+const s = await sky.get_app_state({ app: "Notes" });   // { app, text, screenshot: { url } }
+await sky.click({ app: "Notes", element_index: 7 });
+await sky.type_text({ app: "Notes", text: "groceries" });
+```
+
+`cua.open(url)` and `cua.app(name)` remain as a shorter API over the same engine.
 
 ## API at a glance
 
-The full reference ships as the tool description
-([`server/tool-description.md`](server/tool-description.md)), so every agent sees it.
+The agent reads the full guide with `browser.documentation()`, and topics with
+`agent.documentation.get(name)` (accessibility, file-uploads, computer-use, …). The sources
+are in [`server/docs`](server/docs).
 
 | Area | Calls |
 | --- | --- |
-| Tabs | `cua.open(url)`, `cua.tab(id?)`, `cua.browser.tabs()`, `cua.browser.restart()`, `tab.keep()` |
-| Navigation | `goto`, `back`, `forward`, `reload`, `close`, `url()`, `title()` |
-| Reading | `read({ full })`, `find(query)`, `text()`, `screenshot({ fullPage })` |
-| Acting | `click(target)`, `hover`, `typeText(target, text)`, `setValue`, `pressKey(target, "ctrl+a")`, `scroll(target, dir, pages)`, `drag(a, b)`, `upload(target, paths)` |
-| Page scripting | `evaluate(fn, arg)` (live DOM), `waitFor(textOrSelector)`, `cdp(method, params)` |
-| Debugging | `getLogs({ level })`, `getRequests({ filter })`, `dialog` + `handleDialog(accept, text)` |
-| Native apps | `cua.apps()`, `cua.app(q)` → `read`, `find`, `click`, `setValue`, `typeText`, `pressKey`, `action`, `scroll`, `focus`, `screenshot` |
-| UI & config | `cua.ui()`, `cua.hud.show()`, `cua.hud.status(text)`, `cua.config()`, `cua.setConfig(patch)` |
+| Browser | `agent.browsers.getDefault()`, `browser.tabs.new/get/list/selected`, `tabs.content({ urls })`, `nameSession(name)`, capabilities `visibility`, `viewport` |
+| Tab | `goto`, `back`, `forward`, `reload`, `close`, `url`, `title`, `screenshot({ fullPage, clip })`, `getJsDialog()`, `markDeliverable()`, `markHandoff()` |
+| `tab.ax` | `write/get("state" \| "screenshot" \| "both")`, `click`, `typeText`, `setValue`, `pressKey`, `paste`, `selectText`, `scroll`, `drag`, `performSecondaryAction` |
+| `tab.playwright` | `getByRole/Text/Label/Placeholder/TestId`, `locator`, `frameLocator` → `click`, `fill`, `press`, `check`, `selectOption`, `setInputFiles`, reads; `evaluate`, `waitForURL`, `waitForLoadState`, `expectNavigation`, `waitForEvent("download" \| "filechooser")`, `domSnapshot`, `elementInfo`, `elementScreenshot` |
+| `tab.dom_cua` | `get_visible_dom()` (all frames, node ids), `click`, `double_click`, `scroll`, `type`, `keypress`, `downloadMedia` |
+| `tab.cua` | coordinate `click`, `double_click`, `move`, `drag`, `scroll`, `type`, `keypress`, `downloadMedia` |
+| Tab extras | `clipboard` (the browser's own), `content.export()`, `exportGsuite(type)`, `exportYouTubeTranscript()`, `dev.logs()`, capabilities `cdp`, `pageAssets`, `webmcp` |
+| `sky` | `list_apps`, `get_app_state`, `click`, `set_value`, `type_text`, `press_key`, `paste`, `scroll`, `select_text`, `perform_secondary_action`, `drag` |
 
-A target can be an index from the last read, a CSS selector, or `[x, y]`. `read`, `find`
-and `screenshot` print their output into the tool result themselves; pass
-`{ emit: false }` to keep a result in JS and `write()` only what matters.
+Extension-only parts of the ChatGPT app's API (your own browser's open tabs and history)
+report that they aren't available here.
 
 ## In the Claude app
 
@@ -319,6 +326,12 @@ flowchart LR
   - Input goes through `Input.dispatch*`, so it's page-level and never touches the OS.
   - The live view uses `Page.startScreencast`, with the page's metrics matched to the
     viewer's size.
+- **Locators.** Playwright (`playwright-core`, no browser download) connects to the same
+  Chrome as a second CDP client, so `tab.playwright` has Playwright's exact semantics while
+  input still goes to the page, never the OS.
+- **Cursor sync.** Every agent action announces a cursor move; the live view animates it and
+  reports when it has arrived, and the action waits for that (up to about a second), so the
+  cursor you see is where the agent acts.
 - **Native agent.** A Swift app that owns the Accessibility and Screen Recording grants.
   - It builds indexed AX snapshots per process.
   - It presses, sets values, scrolls and hit-tests through AX.
@@ -373,7 +386,12 @@ server/
     cdp.mjs              minimal CDP client over Node's WebSocket
     snapshot.mjs         AX tree → indexed text, and diffs
     repl.mjs             persistent per-session vm REPL
-    api.mjs              the `cua` object agents use
+    api.mjs              the session globals: cua, agent, sky, nodeRepl
+    codex.mjs            the ChatGPT-compatible browser API (agent / browser / tab)
+    sky.mjs              the ChatGPT-compatible computer-use API
+    pw.mjs               Playwright on cua's browser, for locators
+    visible-dom.mjs      in-page script behind dom_cua.get_visible_dom()
+    docs.mjs             serves server/docs
     native.mjs           client for CuaAgent
     hud.mjs              HUD feed (frames, cursor, source)
     web.mjs              live view + settings server, WebSocket stream
@@ -381,7 +399,9 @@ server/
     keys.mjs             "ctrl+shift+t" → CDP key events
   web/
     browser.html         live view
+    cursor.js            the agent cursor (springs, curves, arrival events)
     settings.html        settings page
+  docs/                  guides agents read on demand (browser, accessibility, computer-use, …)
 agent/CuaAgent.swift     Accessibility + ScreenCaptureKit agent
 hud/CuaPreview.swift     the HUD
 skill/SKILL.md           Claude Code skill

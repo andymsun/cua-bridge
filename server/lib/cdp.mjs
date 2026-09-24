@@ -2,7 +2,7 @@
 // Flattened sessions: one browser connection, each tab addressed by sessionId.
 
 export class CDP {
-  #ws; #id = 0; #pending = new Map(); #handlers = new Map();
+  #ws; #id = 0; #pending = new Map(); #handlers = new Map(); #any = new Set();
   closed = false;
 
   static async connect(url) {
@@ -35,6 +35,7 @@ export class CDP {
   }
 
   #emit(method, params, sessionId) {
+    for (const h of this.#any) { try { h(method, params, sessionId); } catch {} }
     for (const h of this.#handlers.get(method) ?? []) {
       try { h(params, sessionId); } catch {}
     }
@@ -64,6 +65,9 @@ export class CDP {
     this.#handlers.get(method).add(handler);
     return () => this.#handlers.get(method)?.delete(handler);
   }
+
+  /** Every event, for raw-CDP event buffers. Returns an unsubscribe function. */
+  onAny(handler) { this.#any.add(handler); return () => this.#any.delete(handler); }
 
   close() { try { this.#ws.close(); } catch {} }
 }

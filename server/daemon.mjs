@@ -12,6 +12,7 @@ import { Hud } from "./lib/hud.mjs";
 import { Session } from "./lib/repl.mjs";
 import { makeApiFactory } from "./lib/api.mjs";
 import { startWeb } from "./lib/web.mjs";
+import { PlaywrightBridge } from "./lib/pw.mjs";
 import { currentMode } from "./lib/harness.mjs";
 
 ensureDirs();
@@ -47,7 +48,8 @@ const urls = () => {
   const port = web?.port ?? config().web.port;
   return { browser: `http://127.0.0.1:${port}/?t=${token}`, settings: `http://127.0.0.1:${port}/settings?t=${token}` };
 };
-const makeApi = makeApiFactory({ engine, native, hud, urls });
+const pw = new PlaywrightBridge(engine);
+const makeApi = makeApiFactory({ engine, native, hud, urls, pw });
 const sessions = new Map();
 const session = (id) => { if (!sessions.has(id)) sessions.set(id, new Session(id, makeApi)); return sessions.get(id); };
 

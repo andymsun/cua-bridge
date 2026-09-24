@@ -38,6 +38,10 @@ export function fromCdpAx(nodes, { maxTextLength = 120 } = {}) {
     let emit = false, text = "";
     if (role === "StaticText" || role === "InlineTextBox") {
       if (role === "StaticText" && name && name !== parentName) { emit = true; text = `text "${name}"`; }
+    } else if (role === "Iframe") {
+      // the frame's own tree is spliced in after this entry (see Tab.#snapshot)
+      out.push({ indent: depth, text: `iframe${name ? ` "${name}"` : ""}`, ref: node.backendDOMNodeId, frameOwner: node.backendDOMNodeId });
+      return;
     } else if (INTERACTIVE.has(role) || (NAMED_STRUCTURE.has(role) && name) || role === "RootWebArea") {
       emit = role !== "RootWebArea";
       const states = STATE_PROPS

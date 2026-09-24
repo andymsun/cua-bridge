@@ -1,0 +1,10 @@
+{
+  "name": "cua",
+  "private": true,
+  "type": "module",
+  "description": "Background browser and computer use for any agent harness",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

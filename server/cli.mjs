@@ -76,6 +76,8 @@ switch (cmd) {
     console.log(ok(node >= 22, `node ${process.versions.node} (need 22+ for built-in WebSocket)`));
     let exe = null; try { exe = findExecutable(); } catch {}
     console.log(ok(!!exe, `browser: ${exe ?? "none found - set browser.executable"}`));
+    let pwOk = false; try { await import("playwright-core"); pwOk = true; } catch {}
+    console.log(ok(pwOk, `playwright-core ${pwOk ? "installed" : "missing - run install.sh"}`));
     console.log(ok(fs.existsSync(agentApp), `native agent: ${agentApp}`));
     console.log(ok(fs.existsSync(hudApp), `HUD: ${hudApp}`));
     console.log(ok(fs.existsSync(paths.config), `config: ${paths.config}`));
