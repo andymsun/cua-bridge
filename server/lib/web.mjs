@@ -122,23 +122,26 @@ export function startWeb({ engine, native, hud, token, status }) {
         buf = buf.subarray(need);
         if (op === 0x8) { sock.end(); return; }
         if (op === 0x9) { sock.write(Buffer.concat([Buffer.from([0x8a, payload.length]), payload])); continue; }
-        if (op === 0x1) { try { onViewerMessage(JSON.parse(payload.toString())); } catch {} }
+        if (op === 0x1) { try { onViewerMessage(JSON.parse(payload.toString()), sock); } catch {} }
       }
     });
     const close = () => {
       if (!sockets.delete(sock)) return;
       engine.consumers--;
-      if (sockets.size === 0) engine.setViewport(null);    // back to the configured size
+      // fall back to the most recent remaining viewer's size, or the configured size
+      const rest = [...sockets].filter((s) => s.vp).sort((a, b) => a.vp.at - b.vp.at).pop();
+      if (rest || sockets.size === 0) { clearTimeout(vpTimer); engine.setViewport(rest ? rest.vp : null).catch(() => {}); }
       else engine.syncStreaming();
     };
     sock.on("close", close); sock.on("error", close);
   });
 
   let vpTimer = null;
-  async function onViewerMessage(m) {
+  async function onViewerMessage(m, sock) {
     if (m.type === "viewport") {
+      sock.vp = { w: m.w, h: m.h, dpr: Math.min(m.dpr || 1, 2), at: Date.now() };
       clearTimeout(vpTimer);
-      vpTimer = setTimeout(() => engine.setViewport({ w: m.w, h: m.h, dpr: Math.min(m.dpr || 1, 2) }).catch(() => {}), 120);
+      vpTimer = setTimeout(() => engine.setViewport(sock.vp).catch(() => {}), 120);
       return;
     }
     if (m.type === "nav") { await navigate(m).catch(() => {}); return; }

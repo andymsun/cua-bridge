@@ -192,8 +192,11 @@ export class BrowserEngine {
   async newTab(url = "about:blank") {
     await this.ensure();
     const headless = config().browser.headless;
-    const { targetId } = await this.cdp.send("Target.createTarget", {
-      url: "about:blank", background: true, newWindow: !headless,
+    const create = (newWindow) => this.cdp.send("Target.createTarget", { url: "about:blank", background: true, newWindow });
+    // after the last tab closes there is no window left to add a tab to; open one
+    const { targetId } = await create(!headless).catch((e) => {
+      if (/no browser is open/.test(e.message)) return create(true);
+      throw e;
     });
     for (let i = 0; i < 50 && !this.tabs.has(targetId); i++) await sleep(20);
     const tab = this.tabs.get(targetId) ?? await this.#attach({ targetId, type: "page", title: "", url: "about:blank" });
