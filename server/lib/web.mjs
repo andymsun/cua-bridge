@@ -11,6 +11,7 @@ import { applyMode, currentMode } from "./harness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = (name) => fs.readFileSync(path.join(here, "..", "web", name), "utf8");
+const safeColor = (c) => (/^#[0-9a-f]{3,8}$|^[a-z]+$/i.test(String(c)) ? c : "#339cff");
 
 export function startWeb({ engine, native, hud, token, status }) {
   const viewers = new Set();      // MJPEG responses
@@ -26,7 +27,7 @@ export function startWeb({ engine, native, hud, token, status }) {
 
   const state = () => ({
     type: "state", running: engine.running, tabs: engine.running ? engine.list() : [],
-    active: engine.active?.id ?? null, source: hud.source,
+    active: engine.active?.id ?? null, source: hud.source, sessionName: engine.sessionName ?? null,
   });
 
   const server = http.createServer(async (req, res) => {
@@ -36,7 +37,10 @@ export function startWeb({ engine, native, hud, token, status }) {
       switch (`${req.method} ${url.pathname}`) {
         case "GET /":
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          return res.end(page("browser.html").replaceAll("{{TOKEN}}", token));
+          return res.end(page("browser.html").replaceAll("{{TOKEN}}", token).replaceAll("{{CURSOR_COLOR}}", safeColor(config().hud.cursorColor)));
+        case "GET /cursor.js":
+          res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+          return res.end(page("cursor.js"));
         case "GET /settings":
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
           return res.end(page("settings.html").replaceAll("{{TOKEN}}", token));
@@ -134,6 +138,7 @@ export function startWeb({ engine, native, hud, token, status }) {
     const close = () => {
       if (!sockets.delete(sock)) return;
       engine.consumers--;
+      if (sock.animates) engine.animatedViewers--;
       // fall back to the most recent remaining viewer's size, or the configured size
       const rest = [...sockets].filter((s) => s.vp).sort((a, b) => a.vp.at - b.vp.at).pop();
       if (rest || sockets.size === 0) { clearTimeout(vpTimer); engine.setViewport(rest ? rest.vp : null).catch(() => {}); }
@@ -144,6 +149,8 @@ export function startWeb({ engine, native, hud, token, status }) {
 
   let vpTimer = null;
   async function onViewerMessage(m, sock) {
+    if (m.type === "hello") { if (m.animatesCursor && !sock.animates) { sock.animates = true; engine.animatedViewers++; } return; }
+    if (m.type === "arrived") { engine.cursorArrived(m.seq); return; }
     if (m.type === "viewport") {
       sock.vp = { w: m.w, h: m.h, dpr: Math.min(m.dpr || 1, 2), at: Date.now() };
       clearTimeout(vpTimer);

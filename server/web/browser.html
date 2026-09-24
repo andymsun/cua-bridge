@@ -30,12 +30,7 @@
   .who { font-size: 11px; color: var(--muted); padding: 0 6px; white-space: nowrap; }
   .stage { position: relative; flex: 1; min-height: 0; background: #0f0f0f; outline: none; }
   #view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-  #cursor { position: absolute; left: 0; top: 0; width: 22px; height: 22px; pointer-events: none;
-    transition: transform .35s cubic-bezier(.2,.8,.2,1), opacity .3s; opacity: 0;
-    filter: drop-shadow(0 1px 2px rgba(0,0,0,.45)); }
-  .ripple { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%;
-    border: 2px solid var(--accent); pointer-events: none; animation: rip .55s ease-out forwards; }
-  @keyframes rip { from { transform: scale(.3); opacity: .9; } to { transform: scale(1.6); opacity: 0; } }
+  #cursorLayer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
   .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
   a.icon { color: var(--muted); text-decoration: none; }
 </style>
@@ -55,15 +50,16 @@
 <div class="stage" id="stage" tabindex="0">
   <canvas id="view"></canvas>
   <div class="empty" id="empty">No page yet — the agent opens tabs here, or type an address above.</div>
-  <svg id="cursor" viewBox="0 0 22 22"><path d="M3 2 L3 17 L7 13.2 L9.6 19 L12.2 17.9 L9.7 12.2 L15 12.2 Z"
-    fill="#fff" stroke="#111" stroke-width="1.2" stroke-linejoin="round"/></svg>
+  <div id="cursorLayer"></div>
 </div>
+<script src="/cursor.js?t={{TOKEN}}"></script>
 
 <script>
 const T = "{{TOKEN}}";
 const q = (s) => document.querySelector(s);
 q("#settings").href = "/settings?t=" + T;
-const view = q("#view"), stage = q("#stage"), cursor = q("#cursor"), ctx = view.getContext("2d");
+const view = q("#view"), stage = q("#stage"), ctx = view.getContext("2d");
+const cursor = AgentCursor(q("#cursorLayer"), { color: "{{CURSOR_COLOR}}", onArrived: (seq) => send({ type: "arrived", seq }) });
 
 // ---- one WebSocket: binary frames in; JSON state/cursor in; JSON input/nav/viewport out ----
 let ws, state = { tabs: [] }, frameSize = { w: 1, h: 1 };
@@ -73,7 +69,7 @@ const nav = (action, extra = {}) => send({ type: "nav", action, ...extra });
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws?t=${T}`);
   ws.binaryType = "blob";
-  ws.onopen = reportViewport;
+  ws.onopen = () => { send({ type: "hello", animatesCursor: true }); reportViewport(); };
   ws.onclose = () => setTimeout(connect, 800);
   let drawing = false, pending = null;
   ws.onmessage = async (e) => {
@@ -137,21 +133,15 @@ function render() {
   }
   const active = state.tabs.find((t) => t.active);
   if (document.activeElement !== q("#url")) q("#url").value = active?.url && active.url !== "about:blank" ? active.url : "";
-  q("#who").textContent = state.running ? (state.source === "native" ? "agent · native app" : "agent · browser") : "browser idle";
+  q("#who").textContent = state.sessionName ?? (state.running ? (state.source === "native" ? "agent · native app" : "agent · browser") : "browser idle");
   if (!active) q("#empty").style.display = "grid";
 }
 
-// the agent's own cursor, drawn over the frame
+// the agent's own cursor, drawn over the frame; it tells the agent when it has arrived
 function showCursor(c) {
-  if (c.source === "native" || c.app) return;
-  const r = frameRect(), x = r.x + c.x * r.w, y = r.y + c.y * r.h;
-  cursor.style.opacity = 1;
-  cursor.style.transform = `translate(${x - 3}px, ${y - 2}px)`;
-  if (c.kind === "click") setTimeout(() => {
-    const d = document.createElement("div");
-    d.className = "ripple"; d.style.left = x + "px"; d.style.top = y + "px";
-    stage.append(d); setTimeout(() => d.remove(), 600);
-  }, 300);
+  if (c.source === "native" || c.app) { if (c.seq != null) send({ type: "arrived", seq: c.seq }); return; }
+  const r = frameRect();
+  cursor.moveTo(r.x + c.x * r.w, r.y + c.y * r.h, { seq: c.seq ?? null, click: c.kind === "click", animate: !document.hidden });
 }
 
 q("#newTab").onclick = () => nav("new");

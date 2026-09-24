@@ -40,6 +40,7 @@
     "cornerRadius": 10,
     "clickThrough": false,
     "showAgentCursor": true,
+    "cursorColor": "#339cff",
     "controlsCorner": "top-left",
     "glyphClose": "xmark",
     "glyphAction": "hand.raised",

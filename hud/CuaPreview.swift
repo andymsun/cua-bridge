@@ -16,13 +16,20 @@ func readJSON(_ p: String) -> [String: Any] {
     return o
 }
 
+func hexColor(_ hex: String) -> NSColor {
+    var h = hex.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "#", with: "")
+    if h.count == 3 { h = h.map { "\($0)\($0)" }.joined() }
+    guard h.count >= 6, let v = UInt64(h.prefix(6), radix: 16) else { return NSColor(red: 0.2, green: 0.61, blue: 1, alpha: 1) }
+    return NSColor(red: CGFloat((v >> 16) & 255) / 255, green: CGFloat((v >> 8) & 255) / 255, blue: CGFloat(v & 255) / 255, alpha: 1)
+}
+
 struct Cfg: Equatable {
     var enabled = true, mode = "attached", attachTo = "Claude", anchor = "bottom-right"
     var hideWhenHostInactive = true, clickThrough = false, showAgentCursor = true
     var margin: CGFloat = 16, width: CGFloat = 460, opacity: CGFloat = 1, cornerRadius: CGFloat = 10
     var controlsCorner = "top-left", glyphClose = "xmark", glyphAction = "hand.raised", glyphTint = "auto"
     var glyphSize: CGFloat = 20, glyphInset: CGFloat = 14, glyphGap: CGFloat = 26, scrimOpacity: CGFloat = 0.38
-    var hoverFadeIn = 0.12, hoverFadeOut = 0.25
+    var hoverFadeIn = 0.12, hoverFadeOut = 0.25, cursorColor = "#339cff"
     var webPort = 47821
 
     static func load() -> Cfg {
@@ -40,7 +47,7 @@ struct Cfg: Equatable {
         c.glyphClose = s("glyphClose") ?? c.glyphClose; c.glyphAction = s("glyphAction") ?? c.glyphAction
         c.glyphTint = s("glyphTint") ?? c.glyphTint; c.glyphSize = n("glyphSize") ?? c.glyphSize
         c.glyphInset = n("glyphInset") ?? c.glyphInset; c.glyphGap = n("glyphGap") ?? c.glyphGap
-        c.scrimOpacity = n("scrimOpacity") ?? c.scrimOpacity
+        c.scrimOpacity = n("scrimOpacity") ?? c.scrimOpacity; c.cursorColor = s("cursorColor") ?? c.cursorColor
         c.hoverFadeIn = Double(n("hoverFadeIn") ?? CGFloat(c.hoverFadeIn)); c.hoverFadeOut = Double(n("hoverFadeOut") ?? CGFloat(c.hoverFadeOut))
         if let w = all["web"] as? [String: Any], let p = w["port"] as? NSNumber { c.webPort = p.intValue }
         return c
@@ -79,49 +86,165 @@ final class Glyph: NSView {
 }
 
 /// The agent's own cursor: an arrow that glides to each target, plus a click ripple.
+/// A damped spring parameterised like SwiftUI: response (s) and damping fraction.
+struct Spring {
+    var value: CGFloat, target: CGFloat, v: CGFloat = 0, response: CGFloat, damping: CGFloat
+    init(_ x: CGFloat, _ response: CGFloat, _ damping: CGFloat) { value = x; target = x; self.response = response; self.damping = damping }
+    mutating func snap(_ x: CGFloat) { value = x; target = x; v = 0 }
+    mutating func step(_ dt: CGFloat) {
+        let k = pow(2 * .pi / max(0.001, response), 2), c = 4 * .pi * damping / max(0.001, response)
+        var t: CGFloat = 0
+        while t < dt { v += (k * (target - value) - c * v) / 240; value += v / 240; t += 1 / 240 }
+        if abs(target - value) < 0.01 && abs(v) < 0.05 { value = target; v = 0 }
+    }
+    var settled: Bool { value == target && v == 0 }
+}
+
+/// The agent's cursor, matching the live view's: a rounded arrowhead on springs that
+/// curves along long moves, scoots on short ones and settles with a small wiggle.
 final class AgentCursor: NSView {
-    let arrow = CAShapeLayer()
-    override init(frame: NSRect) {
+    static let size: CGFloat = 24, tip: CGFloat = 3.6, rest: CGFloat = -44, far: CGFloat = 196
+    private let holder = CALayer()
+    private var x = Spring(0, 0.19, 0.9), y = Spring(0, 0.19, 0.9), rot = Spring(rest, 0.12, 0.9)
+    private var stretch = Spring(1, 0.2, 0.85), squash = Spring(1, 0.05, 0.82), tilt = Spring(0, 0.05, 0.82)
+    private var vis = Spring(0, 0.42, 0.86), press = Spring(1, 0.16, 0.6)
+    private var curve: (a: CGPoint, c: CGPoint, b: CGPoint, p: Spring)?
+    private var scoot: (a: CGPoint, b: CGPoint, tilt: CGFloat)?
+    private var target: CGPoint?, pendingClick = false, placed = false, axis: CGFloat = 0
+    private var settleAt: CFTimeInterval?, timer: Timer?, last: CFTimeInterval = 0
+
+    override var isFlipped: Bool { true }       // y-down, like the frame coordinates it receives
+
+    init(frame: NSRect, color: NSColor) {
         super.init(frame: frame)
         wantsLayer = true
-        let p = CGMutablePath()
-        let pts: [CGPoint] = [.init(x: 0, y: 0), .init(x: 0, y: -15), .init(x: 4, y: -11.2), .init(x: 6.6, y: -17), .init(x: 9.2, y: -15.9), .init(x: 6.7, y: -10.2), .init(x: 12, y: -10.2)]
-        p.addLines(between: pts); p.closeSubpath()
-        arrow.path = p
-        arrow.fillColor = NSColor.white.cgColor
-        arrow.strokeColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
-        arrow.lineWidth = 1.1; arrow.lineJoin = .round
-        arrow.shadowOpacity = 0.45; arrow.shadowRadius = 1.5; arrow.shadowOffset = CGSize(width: 0, height: -1)
-        arrow.opacity = 0
-        layer?.addSublayer(arrow)
+        holder.bounds = CGRect(x: 0, y: 0, width: Self.size, height: Self.size)
+        holder.anchorPoint = CGPoint(x: Self.tip / Self.size, y: Self.tip / Self.size)
+        holder.opacity = 0
+        let path = AgentCursor.glyphPath()
+        for (radius, alpha) in [(15.0, 0.45), (6.0, 0.9)] {     // coloured glow, wide then tight
+            let g = CAShapeLayer(); g.path = path; g.fillColor = NSColor.black.cgColor
+            g.shadowColor = color.cgColor; g.shadowOpacity = Float(alpha); g.shadowRadius = CGFloat(radius); g.shadowOffset = .zero
+            holder.addSublayer(g)
+        }
+        let arrow = CAShapeLayer()
+        arrow.path = path
+        arrow.fillColor = NSColor(calibratedWhite: 0.05, alpha: 1).cgColor
+        arrow.strokeColor = NSColor.white.cgColor; arrow.lineWidth = 2.2; arrow.lineJoin = .round
+        arrow.shadowColor = NSColor.black.cgColor; arrow.shadowOpacity = 0.35; arrow.shadowRadius = 1.5; arrow.shadowOffset = CGSize(width: 0, height: 1)
+        holder.addSublayer(arrow)
+        layer?.addSublayer(holder)
     }
     required init?(coder: NSCoder) { nil }
     override func hitTest(_ p: NSPoint) -> NSView? { nil }
 
+    /// Rounded arrowhead, tip near (3.6, 3.6), pointing up-left (y-down coordinates).
+    static func glyphPath() -> CGPath {
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: 4.2, y: 3.4))
+        p.addCurve(to: CGPoint(x: 3.4, y: 4.2), control1: CGPoint(x: 3.7, y: 3.2), control2: CGPoint(x: 3.2, y: 3.7))
+        p.addLine(to: CGPoint(x: 9.7, y: 20.5))
+        p.addCurve(to: CGPoint(x: 10.8, y: 20.5), control1: CGPoint(x: 9.9, y: 21.0), control2: CGPoint(x: 10.6, y: 21.0))
+        p.addLine(to: CGPoint(x: 13.3, y: 14.3))
+        p.addCurve(to: CGPoint(x: 13.7, y: 13.9), control1: CGPoint(x: 13.4, y: 14.1), control2: CGPoint(x: 13.5, y: 14.0))
+        p.addLine(to: CGPoint(x: 19.9, y: 11.4))
+        p.addCurve(to: CGPoint(x: 19.9, y: 10.3), control1: CGPoint(x: 20.4, y: 11.2), control2: CGPoint(x: 20.4, y: 10.5))
+        p.closeSubpath()
+        return p
+    }
+
     func move(to p: CGPoint, click: Bool) {
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.35)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.2, 0.8, 0.2, 1))
-        arrow.position = p
-        arrow.opacity = 1
+        vis.target = 1
+        if !placed || vis.value < 0.05 {
+            placed = true; x.snap(p.x); y.snap(p.y); curve = nil; scoot = nil
+            if click { press.value = 0.82; press.target = 1 }
+            run(); return
+        }
+        let a = CGPoint(x: x.value, y: y.value), dx = p.x - a.x, dy = p.y - a.y, dist = hypot(dx, dy)
+        if dist < 0.5 { if click { press.value = 0.82; press.target = 1; run() }; return }
+        settleAt = nil; pendingClick = click; target = p
+        if dist <= Self.far {
+            axis = atan2(dy, dx) * 180 / .pi
+            scoot = (a, p, max(-1, min(1, dx / dist * 0.75 - dy / dist * 0.62)) * 70 * 0.15); curve = nil
+            x.target = p.x; y.target = p.y; x.response = 0.19; y.response = 0.19
+        } else {
+            axis = 0
+            let bow = min(0.22, 40 / dist) * dist, nx = -dy / dist, ny = dx / dist
+            let c = CGPoint(x: (a.x + p.x) / 2 + nx * bow, y: (a.y + p.y) / 2 + ny * bow)
+            let response = min(0.7, max(0.32, dist / 1400))
+            var sp = Spring(0, response, 0.94); sp.target = 1
+            curve = (a, c, p, sp); scoot = nil
+            x.response = min(0.12, max(0.035, response * 0.18)); y.response = x.response
+        }
+        run()
+    }
+
+    func hide() { vis.target = 0; run() }
+
+    private func run() {
+        guard timer == nil else { return }
+        last = 0
+        let t = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(t, forMode: .common); timer = t
+    }
+
+    private func tick() {
+        let now = CACurrentMediaTime()
+        let dt = CGFloat(min(1.0 / 20, last == 0 ? 1.0 / 60 : now - last)); last = now
+        let px = x.value, py = y.value
+        if var cv = curve {
+            cv.p.step(dt); curve = cv
+            let t = min(1, max(0, cv.p.value)), u = 1 - t
+            x.target = u * u * cv.a.x + 2 * u * t * cv.c.x + t * t * cv.b.x
+            y.target = u * u * cv.a.y + 2 * u * t * cv.c.y + t * t * cv.b.y
+            let tx = 2 * u * (cv.c.x - cv.a.x) + 2 * t * (cv.b.x - cv.c.x), ty = 2 * u * (cv.c.y - cv.a.y) + 2 * t * (cv.b.y - cv.c.y)
+            rot.target = angleTo(rot.value, Self.rest + atan2(ty, tx) * 180 / .pi + 135)
+        }
+        for s in [\AgentCursor.x, \.y, \.rot, \.stretch, \.squash, \.tilt, \.vis, \.press] as [ReferenceWritableKeyPath<AgentCursor, Spring>] { self[keyPath: s].step(dt) }
+        let speed = hypot(x.value - px, y.value - py) / max(dt, 1 / 240)
+        stretch.target = min(1, max(0.65, 1 - speed / 5500))
+        if let sc = scoot {
+            let d2 = max(0.0001, pow(sc.b.x - sc.a.x, 2) + pow(sc.b.y - sc.a.y, 2))
+            let t = min(1, max(0, ((x.value - sc.a.x) * (sc.b.x - sc.a.x) + (y.value - sc.a.y) * (sc.b.y - sc.a.y)) / d2))
+            let bump = sin(t * .pi)
+            squash.target = 1 - 0.15 * bump; tilt.target = sc.tilt * bump
+        }
+        if let b = target, hypot(x.value - b.x, y.value - b.y) < 0.85, abs(x.v) < 12, abs(y.v) < 12, (curve?.p.value ?? 1) > 0.999 {
+            x.snap(b.x); y.snap(b.y); curve = nil; scoot = nil; target = nil
+            rot.target = angleTo(rot.value, Self.rest); squash.target = 1; tilt.target = 0; stretch.target = 1
+            settleAt = now
+            if pendingClick { press.value = 0.82; press.v = 0; press.target = 1 }
+        }
+        var r = rot.value
+        if let s0 = settleAt {
+            let t = CGFloat(now - s0), env = sin(min(1, t / 1.4) * .pi)
+            r += sin(t / 0.66 * .pi * 2) * env * 10
+            if t >= 1.4 { settleAt = nil }
+        }
+        let v = min(1, max(0, vis.value)), scale = (0.4 + 0.6 * v) * press.value
+        let rad = { (deg: CGFloat) in deg * .pi / 180 }
+        var m = CATransform3DIdentity
+        m = CATransform3DRotate(m, rad(axis), 0, 0, 1)
+        m = CATransform3DScale(m, 1, squash.value, 1)
+        m = CATransform3DRotate(m, rad(-axis), 0, 0, 1)
+        m = CATransform3DRotate(m, rad(r - Self.rest + tilt.value), 0, 0, 1)
+        m = CATransform3DScale(m, scale * stretch.value, scale, 1)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        holder.position = CGPoint(x: x.value, y: y.value)
+        holder.transform = m
+        holder.opacity = Float(v)
         CATransaction.commit()
-        guard click else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in self?.ripple(at: p) }
+        let idle = target == nil && settleAt == nil
+            && [x, y, rot, stretch, squash, tilt, vis, press].allSatisfy { $0.settled }
+        if idle { timer?.invalidate(); timer = nil }
     }
-    private func ripple(at p: CGPoint) {
-        let r = CAShapeLayer()
-        r.path = CGPath(ellipseIn: CGRect(x: -14, y: -14, width: 28, height: 28), transform: nil)
-        r.position = p; r.fillColor = nil
-        r.strokeColor = NSColor(red: 0.2, green: 0.61, blue: 1, alpha: 1).cgColor; r.lineWidth = 2
-        layer?.addSublayer(r)
-        let s = CABasicAnimation(keyPath: "transform.scale"); s.fromValue = 0.3; s.toValue = 1.6
-        let o = CABasicAnimation(keyPath: "opacity"); o.fromValue = 0.9; o.toValue = 0
-        let g = CAAnimationGroup(); g.animations = [s, o]; g.duration = 0.55
-        g.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        r.opacity = 0; r.add(g, forKey: nil)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { r.removeFromSuperlayer() }
+
+    private func angleTo(_ from: CGFloat, _ to: CGFloat) -> CGFloat {
+        var d = to - from
+        while d > 180 { d -= 360 }
+        while d < -180 { d += 360 }
+        return from + d
     }
-    func hide() { arrow.opacity = 0 }
 }
 
 /// Whole-surface drag with explicit mouse tracking (reliable on a non-activating panel).
@@ -179,7 +302,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         imageView.unregisterDraggedTypes()
         surface.addSubview(imageView)
 
-        cursor = AgentCursor(frame: surface.bounds); cursor.autoresizingMask = [.width, .height]
+        cursor = AgentCursor(frame: surface.bounds, color: hexColor(cfg.cursorColor)); cursor.autoresizingMask = [.width, .height]
         surface.addSubview(cursor)
 
         controls = NSView(frame: surface.bounds); controls.autoresizingMask = [.width, .height]
@@ -286,7 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let x = (c["x"] as? NSNumber)?.doubleValue, let y = (c["y"] as? NSNumber)?.doubleValue {
             lastCursorT = t
             let b = surface.bounds
-            cursor.move(to: CGPoint(x: CGFloat(x) * b.width, y: b.height - CGFloat(y) * b.height), click: (c["kind"] as? String) == "click")
+            cursor.move(to: CGPoint(x: CGFloat(x) * b.width, y: CGFloat(y) * b.height), click: (c["kind"] as? String) == "click")
         }
     }
 

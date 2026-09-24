@@ -49,6 +49,7 @@ export const defaults = {
     cornerRadius: 10,
     clickThrough: false,
     showAgentCursor: true,
+    cursorColor: "#339cff",      // glow around the agent's cursor (live view and HUD)
     controlsCorner: "top-left",
     glyphClose: "xmark",
     glyphAction: "hand.raised",
