@@ -53,7 +53,8 @@
     "hoverFadeOut": 0.25
   },
   "web": {
-    "port": 47821
+    "port": 47821,
+    "searchEngine": "google"
   },
   "repl": {
     "timeoutMs": 30000,

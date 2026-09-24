@@ -56,6 +56,7 @@
 
 <script>
 const T = "{{TOKEN}}";
+const SEARCH_URL = "{{SEARCH_URL}}";
 const q = (s) => document.querySelector(s);
 q("#settings").href = "/settings?t=" + T;
 const view = q("#view"), stage = q("#stage"), ctx = view.getContext("2d");
@@ -152,7 +153,7 @@ q("#url").onkeydown = (e) => {
   if (e.key !== "Enter") return;
   let v = e.target.value.trim();
   if (!v) return;
-  if (!/^[a-z]+:\/\//i.test(v)) v = /\s/.test(v) || !/\./.test(v) ? "https://duckduckgo.com/?q=" + encodeURIComponent(v) : "https://" + v;
+  if (!/^[a-z]+:\/\//i.test(v)) v = /\s/.test(v) || !/\./.test(v) ? SEARCH_URL.replace("%s", encodeURIComponent(v)) : "https://" + v;
   nav(state.tabs.length ? "goto" : "new", { url: v });
   stage.focus();
 };

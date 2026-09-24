@@ -76,6 +76,7 @@ const ENUMS = {
   "hud.anchor": ["bottom-right", "bottom-left", "top-right", "top-left", "center"],
   "hud.controlsCorner": ["top-left", "top-right", "bottom-left", "bottom-right"],
   "hud.glyphTint": ["auto", "light", "dark"],
+  "web.searchEngine": ["google", "bing", "brave", "duckduckgo"],
 };
 const HELP = {
   "hud.cursorColor": "Glow colour of the agent's cursor, e.g. #339cff.",
@@ -107,6 +108,7 @@ function field(path, def, val) {
   if (ENUMS[path]) {
     input = document.createElement("select");
     for (const o of ENUMS[path]) input.add(new Option(o, o, false, o === val));
+    if (val != null && !ENUMS[path].includes(val)) input.add(new Option(val, val, false, true));   // keep custom values from the file
   } else if (typeof def === "boolean") {
     input = Object.assign(document.createElement("input"), { type: "checkbox", checked: !!val });
   } else if (typeof def === "number") {

@@ -61,7 +61,7 @@ export const defaults = {
     hoverFadeIn: 0.12,
     hoverFadeOut: 0.25,
   },
-  web: { port: 47821 },
+  web: { port: 47821, searchEngine: "google" },   // address-bar searches: google | bing | brave | duckduckgo | a URL with %s
   repl: { timeoutMs: 30000, maxOutputChars: 20000 },
 };
 

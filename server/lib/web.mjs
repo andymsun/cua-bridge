@@ -11,6 +11,9 @@ import { applyMode, currentMode } from "./harness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = (name) => fs.readFileSync(path.join(here, "..", "web", name), "utf8");
+const SEARCH = { google: "https://www.google.com/search?q=%s", bing: "https://www.bing.com/search?q=%s",
+  brave: "https://search.brave.com/search?q=%s", duckduckgo: "https://duckduckgo.com/?q=%s" };
+const searchUrl = (e) => SEARCH[e] ?? (/^https?:\/\/[^"<>\s]+%s/.test(String(e)) ? e : SEARCH.google);
 const safeColor = (c) => (/^#[0-9a-f]{3,8}$|^[a-z]+$/i.test(String(c)) ? c : "#339cff");
 
 export function startWeb({ engine, native, hud, token, status }) {
@@ -37,7 +40,8 @@ export function startWeb({ engine, native, hud, token, status }) {
       switch (`${req.method} ${url.pathname}`) {
         case "GET /":
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-          return res.end(page("browser.html").replaceAll("{{TOKEN}}", token).replaceAll("{{CURSOR_COLOR}}", safeColor(config().hud.cursorColor)));
+          return res.end(page("browser.html").replaceAll("{{TOKEN}}", token).replaceAll("{{CURSOR_COLOR}}", safeColor(config().hud.cursorColor))
+            .replaceAll("{{SEARCH_URL}}", searchUrl(config().web.searchEngine)));
         case "GET /cursor.js":
           res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
           return res.end(page("cursor.js"));
