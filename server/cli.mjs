@@ -71,11 +71,18 @@ switch (cmd) {
       try { if (JSON.parse(fs.readFileSync(f.replace("~", process.env.HOME), "utf8")).mcpServers?.cua) harnesses.push(name); } catch {}
     }
     console.log(ok(harnesses.length > 0, `registered in: ${harnesses.join(", ") || "no harness"}`));
-    if (await up()) {
-      const s = await post("/status", 15000);
-      console.log(ok(s.agent.reachable && s.agent.accessibility, "Accessibility granted to CuaAgent (native apps)"));
-      console.log(ok(s.agent.reachable && s.agent.screenRecording, "Screen Recording granted to CuaAgent (native app screenshots / HUD)"));
-    } else console.log("• daemon not running - `cua start` for permission checks");
+    // permissions can only be read from a running agent - start it (in the background) if needed
+    await start();
+    let s = await post("/status", 15000);
+    if (!s.agent.reachable && fs.existsSync(agentApp)) {
+      execFile("open", ["-g", "-j", agentApp]);
+      for (let i = 0; i < 30 && !s.agent.reachable; i++) { await sleep(200); s = await post("/status", 15000); }
+    }
+    if (!s.agent.reachable) console.log("✗ CuaAgent did not start - check it is installed");
+    else {
+      console.log(ok(s.agent.accessibility, "Accessibility granted to CuaAgent (native apps)"));
+      console.log(ok(s.agent.screenRecording, "Screen Recording granted to CuaAgent (native screenshots, HUD for apps)"));
+    }
     break;
   }
   default:
