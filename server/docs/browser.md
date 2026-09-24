@@ -26,7 +26,8 @@ await tab.ax.write();              // indexed accessibility state, emitted into 
 4. **Coordinates (`tab.cua`)** as a last resort, from a screenshot.
 
 Use a purpose-built connector, API or CLI instead when one covers the task and the user did
-not ask for the browser.
+not ask for the browser. For web searches, use your harness's web search tool and open the
+results you need here; don't drive search-engine result pages in the browser.
 
 ## API
 
