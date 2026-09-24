@@ -1,120 +1,109 @@
-# cua-bridge
+# cua
 
-Gives Claude Code the browser and computer-use runtime that ships inside the
-ChatGPT/Codex desktop app, plus a live preview HUD modelled on Codex's own.
+Codex-style browser and computer use for any agent harness - Claude Code,
+Antigravity, Gemini CLI, Cursor, or anything that speaks MCP. An independent
+implementation on public APIs (Chrome DevTools Protocol, macOS Accessibility,
+ScreenCaptureKit); it does not use or ship any part of the Codex runtime.
 
-macOS only. Wraps a proprietary runtime that the desktop app supplies; nothing
-here redistributes it.
+Everything runs **in the background**. The browser is headless with its own
+profile, native apps are driven through Accessibility, and your real cursor and
+keyboard are never touched. A HUD and a live browser view show you what the agent
+is doing, with its own cursor, and let you take over.
 
-## Why
+## Why it feels like Codex
 
-It is not tool count. Claude Code already ships ~66 UI-automation tools; Codex
-ships three. The difference is shape: Codex exposes one `js` tool into a
-persistent Node REPL, so a sequence that costs 8+ round trips with discrete
-tools becomes one call, with loops, conditionals and retries inside it.
-
-| | Claude Code built-ins | this bridge |
+| | typical browser tools | cua |
 | --- | --- | --- |
-| Interface | N fixed-arity tools | one `js` tool into a persistent REPL |
-| Composition | static batch, no data flow between steps | arbitrary JS control flow |
-| State | stateless between calls | top-level bindings persist |
-| Observation | full a11y tree each time | tree returned as a diff |
-| Surfaces | 3 servers, 3 idioms | one interface for tabs *and* native apps |
+| Interface | many fixed tools, one round trip per click | one `js` tool into a persistent REPL: loops, retries, conditionals in one call |
+| State | re-found every call | `const tab = ...` persists between calls |
+| Reading | full page tree every time | indexed accessibility tree, then **diffs** |
+| Input | moves your mouse or needs a window | page-level CDP events and Accessibility actions, fully background |
+| Visibility | screenshots on request | live HUD + live browser view with the agent's cursor |
+| Harnesses | one | any MCP client; all share one browser and its logins |
 
 ## Install
 
 ```sh
-git clone git@github.com:andymsun/cua-bridge.git
-cd cua-bridge && ./install.sh
+git clone git@github.com:andymsun/cua-bridge.git ~/.local/share/cua-bridge
+~/.local/share/cua-bridge/install.sh
 ```
 
-Then grant Screen Recording to `~/Applications/CuaCapture.app` and start both:
+Requires macOS 14+, Node 22+, Xcode command line tools, and a Chromium-family
+browser (Chrome, Chromium, Helium, Brave or Edge). The installer builds two small
+apps, registers the MCP server with every harness it finds (Claude Code, Antigravity,
+Antigravity IDE, Gemini CLI, Cursor; `--with-codex` for Codex), installs the
+Claude Code skill and the `cua` CLI. Re-running it updates everything and keeps
+CuaAgent as-is, so its permissions stay granted.
 
-```sh
-open ~/Applications/CuaCapture.app && open ~/Applications/CuaPreview.app
+Browser control works immediately. For native apps, grant **CuaAgent** once:
+System Settings > Privacy & Security > **Accessibility** and **Screen Recording**.
+
+Any other harness: an MCP stdio server with command `node` and args
+`["~/.local/share/cua-bridge/server/shim.mjs"]`.
+
+## Using it
+
+The agent gets one tool, `js`:
+
+```js
+const tab = await cua.open("https://example.com");  // background tab, becomes the driven tab
+await tab.read();          // 12 link "More information…" ...
+await tab.click(12);
+await tab.read();          // (changes since last read: +14 −3, ...)
+
+const notes = await cua.app("Notes");               // native apps, same model
+await notes.read();
 ```
 
-Restart Claude Code so it picks up the `cua` MCP server. `./uninstall.sh` reverses
-everything and keeps your config.
+The full API is in the tool description (`server/tool-description.md`).
 
-## What it installs
+## The parts
 
-| Path | Notes |
+| Piece | What it does |
 | --- | --- |
-| `~/.claude/cua-bridge/cua-bridge.py` | stdio MCP shim. Adds Codex's turn metadata and answers elicitation. |
-| `~/.claude/cua-bridge/*.mjs` | `preview` (capture + targeting), `iab` (built-in browser), `tabstream` (per-tab CDP screencast). |
-| `~/Applications/CuaCapture.app` | Holds Screen Recording. Runs the `SCStream`, writes frames + host bounds. |
-| `~/Applications/CuaPreview.app` | The HUD. No permissions. |
-| `~/.claude/skills/cua/SKILL.md` | Usage protocol, loaded by Claude Code. |
-| `~/.claude/cua-bridge/config.json` | Your settings. Not tracked; seeded from `config.example.json`. |
+| `server/shim.mjs` | The MCP server a harness registers. Starts the daemon if needed; gives each harness session its own REPL. |
+| `server/daemon.mjs` | One per user. Owns the browser, native agent connection, HUD feed and web UI. |
+| `server/lib/browser.mjs` | Zero-dependency CDP engine: tabs, accessibility snapshots, input, dialogs, console, network, uploads, screencast. |
+| `agent/CuaAgent.swift` | Holds Accessibility + Screen Recording. Presses, sets values, scrolls and hit-tests through Accessibility; keys go only to the target process; captures windows even when covered. |
+| `hud/CuaPreview.swift` | The HUD: chrome-less card, the agent's own cursor with click ripples, hover controls, attach-to-host behaviour. Needs no permissions. |
+| `server/web/` | Live browser (Codex-style in-app browser, take-over-able) and the settings page. |
+| `skill/SKILL.md` | Claude Code skill, including the hybrid flow below. |
 
-## Configuration
+## Hybrid with the Claude app
 
-`config.json` is hot-reloaded - edit and it applies live, no restart.
+cua's live browser is a local web page: tab strip, address bar, the agent's cursor,
+and full take-over (your clicks and typing go to the page, not your OS). The Claude
+skill opens it in Claude's own browser pane, so Claude gets a Codex-style in-app
+browser while still being Claude:
 
-| Key | Values |
+1. `cua.ui()` → `{ browser, settings }`
+2. open the `browser` URL in the browser pane (`preview_start`)
+
+## Settings
+
+`cua settings` opens a settings page generated from the config schema; everything
+applies live. The file is `~/.config/cua/config.json`.
+
+| Section | Highlights |
 | --- | --- |
-| `mode` | `attached` (pins to host window, hides when it loses focus) · `overlay` (floats above all, all Spaces) · `normal` |
-| `attachTo` `anchor` `margin` | host app · `top-left`/`top-right`/`bottom-left`/`bottom-right`/`center` · px |
-| `hideWhenHostInactive` | in-app behaviour for attached mode |
-| `width` `fps` `showCursor` | capture settings; changing these restreams |
-| `opacity` `cornerRadius` `clickThrough` | card chrome |
-| `controlsCorner` | which corner the hover glyphs sit in |
-| `glyphClose` `glyphAction` | any SF Symbol name |
-| `glyphSize` `glyphInset` `glyphGap` | glyph metrics |
-| `glyphTint` | `auto` (adapts to page brightness) · `light` · `dark` |
-| `scrimOpacity` `hoverFadeIn` `hoverFadeOut` | hover treatment |
+| browser | executable, `headless`, `attach` (drive your own browser via its CDP URL), profile, viewport, downloads, dialog policy, closing agent tabs at session end |
+| snapshot / native | diffing, line and text limits, tree depth, whether key events are allowed |
+| stream | fps, JPEG quality, width |
+| hud | on/off, attached / overlay / normal, host app, anchor, size, opacity, agent cursor, glyphs, controls corner, scrim, fades |
+| web / repl | UI port, call timeout, output cap |
 
-Environment overrides: `CUA_BRIDGE_HOME`, `CUA_NODE_HOME`, `CUA_RUNTIME_DIR`,
-`CUA_IAB_CHROME`, `CUA_IAB_PORT`, `CUA_BRIDGE_ELICIT`, `CUA_BRIDGE_TURN_MODE`.
+## CLI
 
-## The HUD
+`cua status` · `cua start|stop|restart` · `cua ui` · `cua settings` · `cua doctor`
 
-Modelled on Codex's "Computer Use" window: a rounded card with the live frame and
-no chrome at rest; on hover two bare glyphs fade in over a soft radial scrim - no
-button backgrounds. Glyph colour adapts to page brightness. Drag from anywhere.
+## Notes
 
-Dragging is explicit `mouseDown`/`mouseDragged`; a non-activating `NSPanel`
-ignores `isMovableByWindowBackground`. A manual drag stops attached-mode
-auto-anchoring until restart.
-
-## Why two apps
-
-macOS ties a Screen Recording grant to the binary's **cdhash**, so any rebuild
-invalidates it. Capture and UI are separate processes: `CuaCapture` holds the
-grant and stays frozen, `CuaPreview` renders frames from `/tmp/cua-preview/` and
-needs no permissions, so the interface can be changed freely. The daemon also
-publishes host-window bounds so the UI never needs the window list.
-
-## Gotchas
-
-| Symptom | Cause |
-| --- | --- |
-| `Sky Computer Use native pipe startup failed` | The ChatGPT app is running and owns the computer-use service. Quit it. |
-| `Computer Use was not approved` | Client does not answer MCP elicitation. Install sets `CUA_BRIDGE_ELICIT=accept`. |
-| HUD shows the wrong tab | Window capture follows the window, not the driven tab. Use `watchTab()`, not `watchApp()`. |
-| HUD frozen on one frame | CDP only emits on visual change. An idle page produces no frames. |
-| Screen Recording stops working | Something rebuilt `CuaCapture`. Re-grant. |
-| `node_repl exec context not found` | A cua call ran outside a `js` tool call. Only `tabstream.mjs` streams between calls. |
-
-Codex's in-app browser (`iab`) is not reachable: it is drawn by the desktop app
-and only exposed when the runtime is hosted inside it. `iab.mjs` gives an
-equivalent - a dedicated headless Chromium under full Playwright/CDP control.
-
-## chezmoi
-
-Not managed by chezmoi directly - it compiles binaries and holds a TCC grant. To
-pull it on every machine, add to the dotfiles repo:
-
-```
-# run_onchange_after_20-cua-bridge.sh.tmpl
-#!/bin/sh
-set -eu
-[ "$(uname)" = "Darwin" ] || exit 0
-repo="$HOME/.local/share/cua-bridge"
-[ -d "$repo" ] || git clone git@github.com:andymsun/cua-bridge.git "$repo"
-git -C "$repo" pull --ff-only
-"$repo/install.sh"
-```
-
-Screen Recording still needs granting once per machine.
+- Tabs an agent opens close when its session ends unless it calls `tab.keep()`.
+- `tab.evaluate` reads the live DOM (including typed values).
+- Headless Chrome can be blocked by some sites; switch `browser.headless` off or
+  use `browser.attach`.
+- macOS ties CuaAgent's permissions to its code signature. The installer only
+  rebuilds it when its source changes (`--rebuild-agent` to force); re-grant after.
+- The web UI binds to 127.0.0.1 and requires a per-install token.
+- `./uninstall.sh` removes everything but your config and browser profiles
+  (`--purge` removes those too).

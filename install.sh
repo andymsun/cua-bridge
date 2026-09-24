@@ -1,95 +1,111 @@
 #!/bin/bash
-# Install the CUA bridge: MCP shim, capture daemon, preview HUD, and skill.
+# Install cua: build the native apps, register the MCP server with every harness
+# found, and install the Claude Code skill. Safe to re-run.
 #
-#   ./install.sh                 install everything
-#   CUA_BRIDGE_HOME=~/x ./install.sh
-#
-# Requires macOS with Xcode command line tools and the ChatGPT/Codex desktop app
-# (it supplies the CUA runtime this bridge wraps).
+#   ./install.sh                 install / update
+#   ./install.sh --rebuild-agent also rebuild CuaAgent (you will need to re-grant its permissions)
+#   ./install.sh --with-codex    also register with Codex
 set -euo pipefail
 
-HOME_DIR="${CUA_BRIDGE_HOME:-$HOME/.claude/cua-bridge}"
-CUA_NODE="${CUA_NODE_HOME:-/Applications/ChatGPT.app/Contents/Resources/cua_node}"
+REPO="$(cd "$(dirname "$0")" && pwd)"
 APPS="$HOME/Applications"
-SRC="$(cd "$(dirname "$0")" && pwd)"
-
+REBUILD_AGENT=0; WITH_CODEX=0
+for a in "$@"; do case "$a" in --rebuild-agent) REBUILD_AGENT=1;; --with-codex) WITH_CODEX=1;; esac; done
 say() { printf '  %s\n' "$*"; }
 
 [ "$(uname)" = "Darwin" ] || { echo "macOS only."; exit 1; }
-command -v swiftc >/dev/null || { echo "swiftc not found. Install Xcode command line tools: xcode-select --install"; exit 1; }
-[ -x "$CUA_NODE/bin/node_repl" ] || {
-  echo "CUA runtime not found at $CUA_NODE"
-  echo "Install the ChatGPT/Codex desktop app, or set CUA_NODE_HOME."
-  exit 1
-}
+NODE="$(command -v node || true)"
+[ -n "$NODE" ] || { echo "Node.js 22+ is required (brew install node)."; exit 1; }
+[ "$("$NODE" -p 'process.versions.node.split(".")[0]')" -ge 22 ] || { echo "Node.js 22+ is required (found $("$NODE" -v))."; exit 1; }
+command -v swiftc >/dev/null || { echo "Xcode command line tools required: xcode-select --install"; exit 1; }
 
-echo "==> paths"
-say "bridge home : $HOME_DIR"
-say "cua runtime : $CUA_NODE"
-
-echo "==> files"
-mkdir -p "$HOME_DIR" "$HOME_DIR/src" "$HOME_DIR/stream" "$APPS"
-cp "$SRC"/js/*.mjs "$HOME_DIR/"
-cp "$SRC"/bridge/cua-bridge.py "$HOME_DIR/"
-cp "$SRC"/hud/src/*.swift "$HOME_DIR/src/"
-chmod +x "$HOME_DIR/cua-bridge.py"
-[ -f "$HOME_DIR/config.json" ] || cp "$SRC/config.example.json" "$HOME_DIR/config.json"
-say "installed js modules, mcp shim, sources, config"
-
-echo "==> skill"
-mkdir -p "$HOME/.claude/skills/cua"
-cp "$SRC/skill/SKILL.md" "$HOME/.claude/skills/cua/SKILL.md"
-say "~/.claude/skills/cua/SKILL.md"
-
-echo "==> build"
-swiftc -O -o "$HOME_DIR/cua-capture-bin" "$SRC/hud/src/CuaCapture.swift"
-swiftc -O -o "$HOME_DIR/cua-ui-bin"      "$SRC/hud/src/CuaPreviewUI.swift"
-say "compiled capture daemon and preview HUD"
-
-mkapp() { # name binary bundleid
-  local app="$APPS/$1.app"
+echo "==> native apps"
+mkdir -p "$APPS" "$REPO/build"
+mkapp() { # name source bundle-id
+  local name="$1" src="$2" id="$3" app="$APPS/$1.app"
+  local hash; hash="$(shasum -a 256 "$src" | cut -c1-16)"
+  if [ "$name" = CuaAgent ] && [ "$REBUILD_AGENT" = 0 ] && [ -d "$app" ] \
+     && [ "$(/usr/libexec/PlistBuddy -c 'Print :CuaSourceHash' "$app/Contents/Info.plist" 2>/dev/null)" = "$hash" ]; then
+    say "$name.app unchanged - kept, so its permissions stay granted"; return
+  fi
+  swiftc -O -swift-version 5 -o "$REPO/build/$name" "$src" 2>&1 | grep -E "error" && exit 1 || true
+  pkill -x "$name" 2>/dev/null || true
   rm -rf "$app"; mkdir -p "$app/Contents/MacOS"
-  cp "$2" "$app/Contents/MacOS/$1"
+  cp "$REPO/build/$name" "$app/Contents/MacOS/$name"
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>$1</string>
-  <key>CFBundleIdentifier</key><string>$3</string>
-  <key>CFBundleExecutable</key><string>$1</string>
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>$name</string>
+  <key>CFBundleIdentifier</key><string>$id</string>
+  <key>CFBundleExecutable</key><string>$name</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
   <key>LSUIElement</key><true/>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
-</dict>
-</plist>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>CuaSourceHash</key><string>$hash</string>
+</dict></plist>
 PLIST
   codesign --force --deep -s - "$app" >/dev/null 2>&1 || true
+  say "built $name.app"
 }
-mkapp CuaCapture "$HOME_DIR/cua-capture-bin" com.anthropic.claude.cuacapture
-mkapp CuaPreview "$HOME_DIR/cua-ui-bin"      com.anthropic.claude.cuapreview
-say "$APPS/CuaCapture.app  (holds Screen Recording)"
-say "$APPS/CuaPreview.app  (UI only, no permissions)"
+mkapp CuaAgent "$REPO/agent/CuaAgent.swift" com.andymsun.cua.agent
+mkapp CuaPreview "$REPO/hud/CuaPreview.swift" com.andymsun.cua.preview
 
-echo "==> mcp server"
+echo "==> config"
+"$NODE" --input-type=module -e "import { ensureDirs, paths } from '$REPO/server/lib/config.mjs'; ensureDirs(); console.log('  ' + paths.config);"
+
+echo "==> cli"
+mkdir -p "$HOME/.local/bin"
+cat > "$HOME/.local/bin/cua" <<SH
+#!/bin/sh
+exec "$NODE" "$REPO/server/cli.mjs" "\$@"
+SH
+chmod +x "$HOME/.local/bin/cua"
+say "~/.local/bin/cua  (status | start | stop | ui | settings | doctor)"
+
+echo "==> harnesses"
+SHIM="$REPO/server/shim.mjs"
+register_json() { # label file
+  local label="$1" file="$2"
+  "$NODE" -e '
+    const fs = require("fs"), [file, node, shim] = process.argv.slice(1);
+    const real = fs.existsSync(file) ? fs.realpathSync(file) : file;
+    let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(real, "utf8") || "{}"); } catch {}
+    cfg.mcpServers = { ...(cfg.mcpServers || {}), cua: { command: node, args: [shim] } };
+    fs.mkdirSync(require("path").dirname(real), { recursive: true });
+    fs.writeFileSync(real, JSON.stringify(cfg, null, 2) + "\n");
+  ' "$file" "$NODE" "$SHIM"
+  say "$label: $file"
+}
 if command -v claude >/dev/null; then
   claude mcp remove cua -s user >/dev/null 2>&1 || true
-  claude mcp add cua --scope user -e CUA_BRIDGE_ELICIT=accept -- /usr/bin/python3 "$HOME_DIR/cua-bridge.py" >/dev/null
-  say "registered as 'cua' (restart Claude Code to pick it up)"
-else
-  say "claude CLI not found - register manually:"
-  say "claude mcp add cua --scope user -e CUA_BRIDGE_ELICIT=accept -- /usr/bin/python3 $HOME_DIR/cua-bridge.py"
+  claude mcp add cua --scope user -- "$NODE" "$SHIM" >/dev/null && say "Claude Code: registered (user scope)"
 fi
+[ -d "$HOME/.gemini/antigravity" ] && register_json "Antigravity" "$HOME/.gemini/antigravity/mcp_config.json"
+[ -d "$HOME/.gemini/antigravity-ide" ] && register_json "Antigravity IDE" "$HOME/.gemini/antigravity-ide/mcp_config.json"
+command -v gemini >/dev/null && register_json "Gemini CLI" "$HOME/.gemini/settings.json"
+[ -d "$HOME/.cursor" ] && register_json "Cursor" "$HOME/.cursor/mcp.json"
+if [ "$WITH_CODEX" = 1 ] && command -v codex >/dev/null; then
+  codex mcp remove cua >/dev/null 2>&1 || true
+  codex mcp add cua -- "$NODE" "$SHIM" >/dev/null && say "Codex: registered"
+fi
+say "anything else: an MCP stdio server with command \"$NODE\" and args [\"$SHIM\"]"
+
+echo "==> Claude Code skill"
+mkdir -p "$HOME/.claude/skills/cua"
+cp "$REPO/skill/SKILL.md" "$HOME/.claude/skills/cua/SKILL.md"
+say "~/.claude/skills/cua/SKILL.md"
 
 cat <<'NEXT'
 
-==> one manual step
-  Grant Screen Recording to CuaCapture.app:
-    System Settings > Privacy & Security > Screen Recording > add ~/Applications/CuaCapture.app
-  Then:
-    open ~/Applications/CuaCapture.app && open ~/Applications/CuaPreview.app
+==> done
+  Browser control works now. Restart your harness so it loads the `cua` server.
 
-  macOS ties that grant to the binary's cdhash. Re-running install.sh rebuilds
-  CuaCapture and invalidates it; re-grant when you do.
+  For native apps, grant CuaAgent.app (once per machine):
+    System Settings > Privacy & Security > Accessibility     > enable CuaAgent
+    System Settings > Privacy & Security > Screen Recording  > enable CuaAgent
+  It asks for both the first time an app is driven. Check with: cua doctor
+
+  Settings UI: cua settings      Live browser: cua ui
 NEXT

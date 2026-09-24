@@ -1,26 +1,61 @@
 {
-  "mode": "attached",
-  "attachTo": "Claude",
-  "anchor": "bottom-right",
-  "hideWhenHostInactive": true,
-  "margin": 16,
-
-  "width": 460,
-  "fps": 30,
-  "showCursor": true,
-
-  "opacity": 1.0,
-  "cornerRadius": 10,
-  "clickThrough": false,
-
-  "controlsCorner": "top-left",
-  "glyphClose": "xmark",
-  "glyphAction": "cursorarrow.click.badge.clock",
-  "glyphSize": 20,
-  "glyphInset": 14,
-  "glyphGap": 26,
-  "glyphTint": "auto",
-  "scrimOpacity": 0.38,
-  "hoverFadeIn": 0.12,
-  "hoverFadeOut": 0.25
+  "browser": {
+    "executable": "auto",
+    "headless": true,
+    "attach": "",
+    "profile": "default",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "downloadsDir": "~/Downloads",
+    "dialogs": "report",
+    "closeTabsOnSessionEnd": true
+  },
+  "snapshot": {
+    "diff": true,
+    "maxLines": 500,
+    "maxTextLength": 120
+  },
+  "native": {
+    "enabled": true,
+    "allowKeyEvents": true,
+    "maxDepth": 30,
+    "maxLines": 500
+  },
+  "stream": {
+    "fps": 12,
+    "quality": 70,
+    "maxWidth": 1280
+  },
+  "hud": {
+    "enabled": true,
+    "mode": "attached",
+    "attachTo": "Claude",
+    "anchor": "bottom-right",
+    "hideWhenHostInactive": true,
+    "margin": 16,
+    "width": 460,
+    "opacity": 1,
+    "cornerRadius": 10,
+    "clickThrough": false,
+    "showAgentCursor": true,
+    "controlsCorner": "top-left",
+    "glyphClose": "xmark",
+    "glyphAction": "hand.raised",
+    "glyphSize": 20,
+    "glyphInset": 14,
+    "glyphGap": 26,
+    "glyphTint": "auto",
+    "scrimOpacity": 0.38,
+    "hoverFadeIn": 0.12,
+    "hoverFadeOut": 0.25
+  },
+  "web": {
+    "port": 47821
+  },
+  "repl": {
+    "timeoutMs": 30000,
+    "maxOutputChars": 20000
+  }
 }
