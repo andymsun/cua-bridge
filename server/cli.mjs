@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cua CLI: status | start | stop | restart | ui | settings | doctor
+// cua CLI: status | start | stop | restart | ui | settings | doctor | use | toggle
 import { execFile, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -9,6 +9,7 @@ import { config, ensureDirs, paths } from "./lib/config.mjs";
 import { findExecutable } from "./lib/browser.mjs";
 import { agentApp } from "./lib/native.mjs";
 import { hudApp } from "./lib/hud.mjs";
+import { MODES, applyMode, currentMode } from "./lib/harness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -53,7 +54,21 @@ switch (cmd) {
     console.log(`daemon: pid ${s.pid}, ${s.sessions} session(s)`);
     console.log(`browser: ${s.browser.running ? `running, ${s.browser.tabs} tab(s)` : "idle"}`);
     console.log(`native agent: ${s.agent.reachable ? `accessibility ${s.agent.accessibility ? "granted" : "NOT granted"}, screen recording ${s.agent.screenRecording ? "granted" : "NOT granted"}` : "not running"}`);
+    console.log(`agents use: ${MODES[currentMode()]}`);
     console.log(`live browser: ${s.urls.browser}\nsettings: ${s.urls.settings}`);
+    break;
+  }
+  case "use": case "toggle": {
+    const arg = process.argv[3];
+    const now = currentMode();
+    if (cmd === "use" && !arg) {
+      console.log(`agents use: ${MODES[now]}`);
+      console.log("switch with: cua use cua | cua use builtin | cua toggle");
+      break;
+    }
+    const next = cmd === "toggle" ? (now === "cua" ? "builtin" : "cua") : arg === "--apply" ? now : arg;
+    for (const line of applyMode(next)) console.log("  " + line);
+    console.log(`agents use: ${MODES[next]}. New agent sessions pick this up; restart open harness windows to apply it there.`);
     break;
   }
   case "doctor": {
@@ -86,6 +101,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.log("usage: cua [status|start|stop|restart|ui|settings|doctor]");
+    console.log("usage: cua [status|start|stop|restart|ui|settings|doctor|use [cua|builtin]|toggle]");
 }
 process.exit(0);

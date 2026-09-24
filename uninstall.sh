@@ -6,6 +6,8 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 PURGE=0; [ "${1:-}" = "--purge" ] && PURGE=1
 
 "$HOME/.local/bin/cua" stop >/dev/null 2>&1
+# give harnesses their built-in browser back
+node --input-type=module -e "import { applyMode, release } from '$REPO/server/lib/harness.mjs'; applyMode('cua'); release();" 2>/dev/null
 pkill -x CuaAgent 2>/dev/null; pkill -x CuaPreview 2>/dev/null
 rm -rf "$HOME/Applications/CuaAgent.app" "$HOME/Applications/CuaPreview.app"
 rm -f "$HOME/.local/bin/cua"

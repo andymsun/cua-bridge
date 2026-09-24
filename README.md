@@ -34,6 +34,7 @@ npm packages.
 - [Using it](#using-it)
 - [API at a glance](#api-at-a-glance)
 - [In the Claude app](#in-the-claude-app)
+- [Switching to the built-in browser](#switching-to-the-built-in-browser)
 - [The HUD](#the-hud)
 - [Configuration](#configuration)
 - [CLI](#cli)
@@ -88,7 +89,7 @@ npm packages.
 
 <p align="center">
   <img src="docs/settings.png" alt="The settings page: live status and every option, grouped by section" width="760">
-  <br><i>Settings: live status (browser, native agent, permissions, sessions) and every option.</i>
+  <br><i>Settings: the cua ↔ built-in browser switch, live status, and every option.</i>
 </p>
 
 ## Install
@@ -217,6 +218,31 @@ Claude:
 
 `cua ui` opens the same view in your default browser.
 
+## Switching to the built-in browser
+
+You can flip every harness between cua and its own built-in browser (such as the
+Claude app's browser pane tools) in one step:
+
+```sh
+cua toggle                 # flip
+cua use builtin            # or pick one explicitly
+cua use cua
+cua use                    # show the current choice
+```
+
+The settings page has the same switch at the top. Switching changes only the entries cua
+manages:
+
+| Harness | cua selected | Built-in browser selected |
+| --- | --- | --- |
+| Claude Code / Claude app | Built-in page-driving browser tools are denied in `~/.claude/settings.json` (`preview_*` stays allowed so the live view can open) | `mcp__cua` is denied instead, and the cua skill is parked |
+| Antigravity, Gemini CLI, Cursor | The `cua` server entry is present | The entry is parked in `~/.config/cua/parked-servers.json` and restored when you switch back |
+
+The rest of each config is left alone. Unreadable configs are skipped rather than
+overwritten, and symlinked configs are written through. Re-running the installer
+re-applies your current choice. Uninstalling removes every rule cua added. The change
+applies to new agent sessions, so restart any harness window that's already open.
+
 ## The HUD
 
 `CuaPreview.app` is a small borderless card that streams what the agent is driving: the
@@ -261,6 +287,7 @@ logs).
 | `cua ui` | Open the live browser view |
 | `cua settings` | Open the settings page |
 | `cua doctor` | Check Node, browser, apps, harness registration and permissions |
+| `cua use [cua\|builtin]` / `cua toggle` | Choose which browser agents use |
 
 ## How it works
 
@@ -320,6 +347,7 @@ flowchart LR
 | A site blocks the headless browser or keeps showing CAPTCHAs | Browsers started with a debugging port are detectable as automated, and cua doesn't hide that. Finish the check yourself in the live view, or set `browser.attach` to a browser you started with `--remote-debugging-port`. |
 | Live view is blank | Run `cua status`. The browser starts on the first `cua.open()`, and `cua restart` resets everything. |
 | The agent doesn't have the tool | Start a new conversation after installing, because harnesses load MCP servers at session start. |
+| You want the harness's own browser for a while | `cua toggle`, then again to come back. |
 | Anything else | The daemon log is at `~/Library/Application Support/cua/run/daemon.log`. |
 
 Turning `browser.headless` off shows a real Chrome window, but Chrome takes focus when it

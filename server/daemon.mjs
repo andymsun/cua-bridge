@@ -12,6 +12,7 @@ import { Hud } from "./lib/hud.mjs";
 import { Session } from "./lib/repl.mjs";
 import { makeApiFactory } from "./lib/api.mjs";
 import { startWeb } from "./lib/web.mjs";
+import { currentMode } from "./lib/harness.mjs";
 
 ensureDirs();
 const log = (...a) => fs.appendFileSync(paths.log, `${new Date().toISOString()} ${a.join(" ")}\n`);
@@ -55,7 +56,7 @@ async function status() {
   try { agent = await native.status(); } catch (e) { agent.error = e.message; }
   return {
     pid: process.pid, browser: { running: engine.running, tabs: engine.running ? engine.list().length : 0 },
-    agent, sessions: sessions.size, urls: urls(), config: paths.config,
+    agent, sessions: sessions.size, urls: urls(), config: paths.config, mode: currentMode(),
   };
 }
 

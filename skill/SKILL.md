@@ -63,9 +63,10 @@ await notes.read();
 - `tab.evaluate` sees the live DOM, including values typed into fields.
 - Tabs you open close when the session ends. `tab.keep()` for anything the user
   should find afterwards.
-- Headless sites that block automation: set `browser.headless` to false in
-  settings (`cua.ui()` → Settings) or attach to the user's own browser with
-  `browser.attach`.
+- If a site blocks the browser or shows a CAPTCHA or other human check, don't try
+  to get around it. Tell the user and let them finish it in the live view, or leave
+  that site to them. Don't turn `browser.headless` off: Chrome takes focus when it
+  launches.
 
 ## Confirm before
 

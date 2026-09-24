@@ -97,6 +97,9 @@ mkdir -p "$HOME/.claude/skills/cua"
 cp "$REPO/skill/SKILL.md" "$HOME/.claude/skills/cua/SKILL.md"
 say "~/.claude/skills/cua/SKILL.md"
 
+echo "==> agent browser"
+"$NODE" "$REPO/server/cli.mjs" use --apply
+
 cat <<'NEXT'
 
 ==> done
@@ -108,4 +111,5 @@ cat <<'NEXT'
   It asks for both the first time an app is driven. Check with: cua doctor
 
   Settings UI: cua settings      Live browser: cua ui
+  Switch agents to the harness's built-in browser and back: cua toggle
 NEXT

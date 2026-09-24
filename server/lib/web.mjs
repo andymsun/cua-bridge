@@ -7,6 +7,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, defaults, saveConfig } from "./config.mjs";
+import { applyMode, currentMode } from "./harness.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = (name) => fs.readFileSync(path.join(here, "..", "web", name), "utf8");
@@ -74,6 +75,11 @@ export function startWeb({ engine, native, hud, token, status }) {
         }
         case "POST /api/browser/restart":
           await engine.shutdown(); await engine.ensure(); return json(res, 200, state());
+        case "GET /api/mode": return json(res, 200, { mode: currentMode() });
+        case "POST /api/mode": {
+          const { mode } = await body(req);
+          return json(res, 200, { mode, report: applyMode(mode) });
+        }
         case "POST /api/hud/show":
           hud.launch(true); return json(res, 200, { ok: true });
         default:
