@@ -53,11 +53,19 @@ const makeApi = makeApiFactory({ engine, native, hud, urls, pw });
 const sessions = new Map();
 const session = (id) => { if (!sessions.has(id)) sessions.set(id, new Session(id, makeApi)); return sessions.get(id); };
 
+// The tab the agent last drove, for harness status lines (title and URL only).
+function activeTab() {
+  if (!engine.running || !engine.active) return null;
+  const t = engine.list().find((x) => x.id === engine.active.id);
+  return t ? { title: t.title, url: t.url } : null;
+}
+
 async function status() {
   let agent = { reachable: false };
   try { agent = await native.status(); } catch (e) { agent.error = e.message; }
   return {
-    pid: process.pid, browser: { running: engine.running, tabs: engine.running ? engine.list().length : 0 },
+    pid: process.pid, browser: { running: engine.running, tabs: engine.running ? engine.list().length : 0, active: activeTab() },
+    hud: { enabled: !!config().hud.enabled, source: hud.source },
     agent, sessions: sessions.size, urls: urls(), config: paths.config, mode: currentMode(),
   };
 }
