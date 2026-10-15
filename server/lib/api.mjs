@@ -31,6 +31,7 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
     });
 
     const opened = new Set();   // tabs this session created; closed at session end unless kept
+    const attached = new Set(); // native previews are owned by this REPL session
     let hinted = false;         // live-view hint goes out once per session
     const hint = () => {
       if (hinted) return;
@@ -59,7 +60,7 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
     };
 
     const apps = async () => native.apps();
-    const app = async (query) => emitting(await native.app(query));
+    const app = async (query, options) => emitting(await native.app(query, options));
 
     const api = {
       browser,
@@ -70,6 +71,14 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
       hud: {
         status: (text) => hud.status(text),
         show: () => hud.launch(true),
+        async attach(app, { host } = {}) {
+          const view = await app.attach({ host: host?.target ?? host });
+          try { await hud.showView(view.id); } catch (error) { await native.detach(view.id); throw error; }
+          attached.add(view.id);
+          return view;
+        },
+        views: () => native.views(),
+        async detach(id) { const result = await native.detach(id); attached.delete(id); return result; },
       },
       ui: () => { write(`Live browser: ${urls().browser}\nSettings: ${urls().settings}`); return urls(); },
       config: () => config(),
@@ -79,6 +88,8 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
     Object.defineProperty(api, "__dispose", {
       enumerable: false,
       value: async () => {
+        for (const id of attached) await native.detach(id).catch(() => {});
+        attached.clear();
         if (!config().browser.closeTabsOnSessionEnd) return;
         for (const t of opened) if (!t.kept && engine.tabs.has(t.id)) await t.close().catch(() => {});
       },

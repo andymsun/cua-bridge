@@ -36,13 +36,22 @@ export class Hud {
 
   /** Point the HUD at the browser, or at a native app window. */
   setSource(source, app) {
-    const pid = source === "native" ? app?.pid ?? null : null;
-    if (this.source === source && this.#nativePid === pid) return;
+    const target = source === "native" ? app?.target : null;
+    const key = target ? `${target.process}:${target.windowId}` : null;
+    if (this.source === source && this.#nativePid === key) return;
     this.source = source;
-    this.#nativePid = pid;
-    // native frames come from CuaAgent's window stream; browser frames come from CDP
-    if (pid || this.#native?.connected) this.#native?.req("stream", { pid }).catch(() => {});
+    this.#nativePid = key;
+    atomicWrite(paths.target, JSON.stringify(target ?? { source: "browser" }));
+    // Explicit target: never choose another window when a capture fails.
+    if (target || this.#native?.connected) this.#native?.req("stream", target ?? { pid: null }).catch((error) => {
+      if (this.#nativePid === key) this.#nativePid = null;
+      this.status(error.message);
+    });
     this.launch();
+  }
+
+  showView(id) {
+    return new Promise((resolve, reject) => execFile("open", ["-n", "-g", hudApp, "--args", "--view", id], (error) => error ? reject(error) : resolve()));
   }
 
   launch(force = false) {

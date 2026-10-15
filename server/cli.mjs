@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, ensureDirs, paths } from "./lib/config.mjs";
 import { findExecutable } from "./lib/browser.mjs";
-import { agentApp } from "./lib/native.mjs";
+import { agentApp, NativeClient } from "./lib/native.mjs";
 import { hudApp } from "./lib/hud.mjs";
 import { MODES, applyMode, currentMode } from "./lib/harness.mjs";
 
@@ -88,21 +88,63 @@ switch (cmd) {
       try { if (JSON.parse(fs.readFileSync(f.replace("~", process.env.HOME), "utf8")).mcpServers?.cua) harnesses.push(name); } catch {}
     }
     console.log(ok(harnesses.length > 0, `registered in: ${harnesses.join(", ") || "no harness"}`));
-    // permissions can only be read from a running agent - start it (in the background) if needed
-    await start();
-    let s = await post("/status", 15000);
-    if (!s.agent.reachable && fs.existsSync(agentApp)) {
-      execFile("open", ["-g", "-j", agentApp]);
-      for (let i = 0; i < 30 && !s.agent.reachable; i++) { await sleep(200); s = await post("/status", 15000); }
-    }
-    if (!s.agent.reachable) console.log("✗ CuaAgent did not start - check it is installed");
+    const agent = await new NativeClient().status();
+    if (!agent.reachable) console.log("? CuaAgent is not running; permissions are unknown. Doctor does not launch services or request permissions.");
     else {
-      console.log(ok(s.agent.accessibility, "Accessibility granted to CuaAgent (native apps)"));
-      console.log(ok(s.agent.screenRecording, "Screen Recording granted to CuaAgent (native screenshots, HUD for apps)"));
+      console.log(ok(agent.accessibility, "Accessibility granted to CuaAgent (native apps)"));
+      console.log(ok(agent.screenRecording, "Screen Recording granted to CuaAgent (native screenshots, HUD for apps)"));
     }
     break;
   }
+  case "apps": {
+    console.log(JSON.stringify(await new NativeClient().apps(), null, 2));
+    break;
+  }
+  case "windows": {
+    if (!process.argv[3]) throw new Error('usage: cua windows "App name or bundle id"');
+    console.log(JSON.stringify(await (await new NativeClient().app(process.argv[3])).windows(), null, 2));
+    break;
+  }
+  case "views": {
+    console.log(JSON.stringify(await new NativeClient().views(), null, 2));
+    break;
+  }
+  case "detach": {
+    if (!process.argv[3]) throw new Error("usage: cua detach VIEW_ID");
+    console.log(JSON.stringify(await new NativeClient().detach(process.argv[3])));
+    break;
+  }
+  case "attach": {
+    const query = process.argv[3];
+    if (!query) throw new Error('usage: cua attach APP --window ID [--host APP --host-window ID]');
+    const flags = {};
+    for (let i = 4; i < process.argv.length; i += 2) {
+      if (!["--window", "--host", "--host-window"].includes(process.argv[i]) || !process.argv[i + 1]) throw new Error("Unknown or incomplete attach option");
+      flags[process.argv[i]] = process.argv[i + 1];
+    }
+    const native = new NativeClient();
+    const app = await native.app(query, { windowId: flags["--window"] ? Number(flags["--window"]) : undefined });
+    let host;
+    if (flags["--host"]) {
+      if (!flags["--host-window"]) throw new Error("Choose an explicit --host-window from cua windows HOST");
+      const parent = await native.app(flags["--host"], { windowId: Number(flags["--host-window"]) });
+      host = parent.target;
+    } else if (flags["--host-window"]) throw new Error("--host-window requires --host");
+    const view = await app.attach({ host });
+    try {
+      await new Promise((resolve, reject) => execFile("open", ["-n", "-g", hudApp, "--args", "--view", view.id], (error) => error ? reject(error) : resolve()));
+    } catch (error) { await native.detach(view.id); throw error; }
+    console.log(JSON.stringify(view, null, 2));
+    break;
+  }
+  case "permissions": {
+    const permission = process.argv[3];
+    if (!["accessibility", "screen-recording"].includes(permission)) throw new Error("usage: cua permissions accessibility|screen-recording");
+    const result = await new NativeClient().req("requestPermission", { permission });
+    console.log(result.granted ? `${permission}: already granted` : result.message);
+    break;
+  }
   default:
-    console.log("usage: cua [status|start|stop|restart|ui|settings|doctor|use [cua|builtin]|toggle]");
+    console.log("usage: cua status|start|stop|restart|ui|settings|doctor|use|toggle\nnative: cua apps|windows APP|attach APP --window ID [--host APP --host-window ID]|views|detach ID\npermissions: cua permissions accessibility|screen-recording");
 }
 process.exit(0);

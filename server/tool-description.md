@@ -22,11 +22,13 @@ await tab.ax.write();
 
 Native Mac apps (same API as the ChatGPT app's computer use):
 ```js
-const s = await sky.get_app_state({ app: "Notes" });   // { app, text, screenshot: { url } }; diffs after the first
-await sky.click({ app: "Notes", element_index: 7 });
-await sky.type_text({ app: "Notes", text: "hi" });
+const windows = await sky.list_windows({ app: "Notes" }); // choose the intended window
+const target = { app: "Notes", window_id: windows[0].windowId };
+const s = await sky.get_app_state(target); // text, screenshot, screenshotError
+await sky.click({ ...target, element_index: 7 });
+await sky.get_app_state(target); // required after every native action
 ```
-Also sky.list_apps, set_value, press_key, paste, scroll, select_text, perform_secondary_action, drag. Guide: `agent.documentation.get("computer-use")`.
+Also sky.list_apps, list_windows, set_value, press_key, paste, scroll, select_text, perform_secondary_action, drag. Every native call accepts window_id; multiple windows require explicit selection. Snapshots are consumed after actions. Read again even after failure; never guess a fallback window. `cua.hud.attach(app, {host})` opens an independent native preview beside an optional explicit host window; `cua.hud.detach(id)` closes it. No browser needed. Guide: `agent.documentation.get("computer-use")`.
 
 Shorthand: `cua.open(url)` returns a tab with read()/find()/click(i)/typeText()/…; `cua.app(name)` for apps; `cua.ui()` gives the live-view and settings URLs.
 

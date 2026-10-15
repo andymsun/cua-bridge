@@ -23,10 +23,10 @@ that fits in a sidebar or a floating HUD, and you can take over at any moment.
 
 It speaks the same API as the ChatGPT app's in-app browser (`agent` / `browser` / `tab`
 with `ax`, `playwright`, `dom_cua`, `cua` and capabilities) and its computer use (`sky`),
-so code and habits written for Codex work unchanged, from any model and any harness. It is
-an independent reimplementation on public APIs (Chrome DevTools Protocol, macOS
-Accessibility, ScreenCaptureKit, Playwright): no Codex or ChatGPT code or assets are used or
-shipped.
+with explicit native window selection and fresh reads after each native action. It is
+an independent implementation using CDP, Accessibility, ScreenCaptureKit and Playwright;
+no Codex or ChatGPT code or assets are shipped. Native window mapping currently uses
+the private `_AXUIElementGetWindow` bridge and can require updates when macOS changes.
 
 ## Contents
 
@@ -60,7 +60,8 @@ shipped.
   After the first read, the agent only gets what changed.
 - **Never touches your cursor.** Browser input goes to the page through CDP. Native apps
   are driven through Accessibility actions, and key events go to one process only.
-  Nothing moves the system pointer or types into whatever you're using.
+  Nothing moves the system pointer. Keyboard focus is checked before dispatch, but
+  another app or person can change it concurrently; this is not an OS input sandbox.
 - **Its own cursor.** A rounded, glowing arrowhead that moves on springs: long moves curve
   and turn along their heading, short ones scoot, and it settles with a small wiggle. Actions
   wait for it to arrive, so what you see is what the agent does. Same motion in the live
@@ -69,8 +70,8 @@ shipped.
   forward) streams the tab the agent is driving at up to 60 fps. The page is rendered at
   the pane's exact size, so it fills the pane. Clicks, scrolling and typing in the view go
   straight to the page.
-- **Native apps too.** Read, click, type, scroll and screenshot any Mac app through the
-  same indexed model, including windows that are covered.
+- **Native apps too.** Read, click, type, scroll and screenshot accessible Mac windows, including
+  covered windows. Protected/custom controls and secure input can be unsupported.
 - **Works in every harness at once.** One daemon per user. Every harness shares the same
   browser, profile and logins, and each agent session gets its own REPL.
 - **Configurable.** A settings page generated from the config schema, where changes apply
@@ -105,11 +106,12 @@ shipped.
 
 ```sh
 git clone git@github.com:andymsun/cua-bridge.git ~/.local/share/cua-bridge
+bash ~/.local/share/cua-bridge/scripts/setup-signing.sh  # explicit local Keychain setup
 ~/.local/share/cua-bridge/install.sh
 ```
 
 **Requirements:** macOS 14+, Node 22+ (for the built-in WebSocket), Xcode command line
-tools, and a Chromium-family browser (Chrome, Chromium, Helium, Brave or Edge).
+tools, Python 3, OpenSSL 3 for local certificate setup, and a Chromium-family browser (Chrome, Chromium, Helium, Brave or Edge).
 
 The installer:
 
@@ -120,12 +122,17 @@ The installer:
    Antigravity IDE, Gemini CLI and Cursor. Pass `--with-codex` to add Codex too.
 3. Installs the Claude Code skill and the `cua` CLI (`~/.local/bin/cua`).
 
-Re-running it updates everything. CuaAgent is only rebuilt when its source changes
-(`--rebuild-agent` forces it), because macOS ties permissions to the app's signature.
+Native apps are compiled and signature-verified before replacement. Keep the same
+code-signing identity on upgrades. Previous bundles are retained and must be inspected
+before another replacement. For a helper-only repair, use
+`python3 scripts/build-native.py` instead of rerunning all integration setup.
+See [permission and signing details](docs/native-permissions.md).
 
-Browser control works right away. For native apps, grant **CuaAgent** once in System
-Settings › Privacy & Security › **Accessibility** and **Screen Recording**, then check with
-`cua doctor`:
+For native apps, explicitly run `cua permissions accessibility` and
+`cua permissions screen-recording`, then grant **CuaAgent** in System Settings.
+Startup, capture and `cua doctor` do not prompt. Moving from an ad-hoc build may
+require a new grant; stable signing is not a guarantee against every macOS prompt.
+An example doctor result (actual grants are reported on your machine):
 
 ```text
 ✓ node 25.2.1 (need 22+ for built-in WebSocket)
@@ -186,7 +193,7 @@ Native apps work the same way:
 ```js
 const s = await sky.get_app_state({ app: "Notes" });   // { app, text, screenshot: { url } }
 await sky.click({ app: "Notes", element_index: 7 });
-await sky.type_text({ app: "Notes", text: "groceries" });
+await sky.get_app_state({ app: "Notes" }); // read again before the next action
 ```
 
 `cua.open(url)` and `cua.app(name)` remain as a shorter API over the same engine.
@@ -260,11 +267,25 @@ cursor and click ripples on top.
   brings the native app forward.
 - **Drag** it from anywhere on the card.
 - **Modes:**
-  - `attached` (the default) pins the HUD to a host app's window, such as Claude, and
+  - `attached` pins the HUD to one explicit host window (terminal, IDE or app), and
     hides it when that app isn't active.
   - `overlay` floats the HUD above everything.
-  - `normal` makes it an ordinary window.
+  - `normal` (the default) makes it an ordinary draggable window without assuming a host.
 - Size, corner, opacity, glyphs, tint, scrim and fade timings are all configurable.
+
+Independent native previews do not replace each other:
+
+```sh
+cua windows "Code"
+cua attach "Code" --window WINDOW_ID
+# optionally add --host "Terminal" --host-window HOST_WINDOW_ID
+cua views
+cua detach VIEW_ID
+```
+
+Use IDs returned by `windows`. The captured target and positioning host are distinct.
+Multiple windows are never selected by largest-window or frontmost fallback.
+See the [native API guide](server/docs/computer-use.md) for per-session previews.
 
 ## Configuration
 
@@ -293,7 +314,10 @@ logs).
 | `cua start` / `stop` / `restart` | Manage the daemon (it also starts on the first tool call) |
 | `cua ui` | Open the live browser view |
 | `cua settings` | Open the settings page |
-| `cua doctor` | Check Node, browser, apps, harness registration and permissions |
+| `cua doctor` | Read-only checks; does not start services or request permissions |
+| `cua permissions accessibility\|screen-recording` | Explicitly request one macOS permission |
+| `cua windows APP` / `apps` | List native targets |
+| `cua attach APP --window ID` / `views` / `detach ID` | Independent native previews |
 | `cua use [cua\|builtin]` / `cua toggle` | Choose which browser agents use |
 
 ## How it works
@@ -333,7 +357,7 @@ flowchart LR
   reports when it has arrived, and the action waits for that (up to about a second), so the
   cursor you see is where the agent acts.
 - **Native agent.** A Swift app that owns the Accessibility and Screen Recording grants.
-  - It builds indexed AX snapshots per process.
+  - It builds per-client UUID snapshots bound to process launch identity and window ID.
   - It presses, sets values, scrolls and hit-tests through AX.
   - Keys are sent with `CGEvent.postToPid`, to that process only.
   - Windows are captured with ScreenCaptureKit, even when they're covered.
@@ -343,7 +367,8 @@ flowchart LR
 ## Security and privacy
 
 - The web UI binds to `127.0.0.1` only and requires a random per-install token.
-- Nothing leaves your machine except the pages the agent visits.
+- CUA runs locally, but its text/screenshots are returned to your harness, which may
+  send them to its model provider. Do not expose sensitive windows without authorization.
 - The agent's browser uses its own profile under
   `~/Library/Application Support/cua/profiles`. It never sees your normal browser's
   cookies unless you point `browser.attach` at it.
@@ -356,7 +381,7 @@ flowchart LR
 
 | Symptom | Fix |
 | --- | --- |
-| Native apps say permission denied | Grant CuaAgent **Accessibility** and **Screen Recording**, then run `cua doctor`. After `--rebuild-agent`, grant them again. |
+| Native apps say permission denied | Use the explicit `cua permissions` commands and grant access yourself; see [signing](docs/native-permissions.md). No TCC reset is needed as an automated step. |
 | A site blocks the headless browser or keeps showing CAPTCHAs | Browsers started with a debugging port are detectable as automated, and cua doesn't hide that. Finish the check yourself in the live view, or set `browser.attach` to a browser you started with `--remote-debugging-port`. |
 | Live view is blank | Run `cua status`. The browser starts on the first `cua.open()`, and `cua restart` resets everything. |
 | The agent doesn't have the tool | Start a new conversation after installing, because harnesses load MCP servers at session start. |

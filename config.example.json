@@ -30,8 +30,8 @@
   },
   "hud": {
     "enabled": true,
-    "mode": "attached",
-    "attachTo": "Claude",
+    "mode": "normal",
+    "attachTo": "",
     "anchor": "bottom-right",
     "hideWhenHostInactive": true,
     "margin": 16,

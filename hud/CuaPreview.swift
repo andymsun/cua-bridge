@@ -9,7 +9,13 @@ let fm = FileManager.default
 let home = fm.homeDirectoryForCurrentUser.path
 let runDir = ProcessInfo.processInfo.environment["CUA_RUN_DIR"] ?? "\(home)/Library/Application Support/cua/run"
 let configPath = ProcessInfo.processInfo.environment["CUA_CONFIG"] ?? "\(home)/.config/cua/config.json"
-let framePath = "\(runDir)/frame.jpg", cursorPath = "\(runDir)/cursor.json", statusPath = "\(runDir)/status.txt"
+let previewID: String? = {
+    guard let index = CommandLine.arguments.firstIndex(of: "--view"), index + 1 < CommandLine.arguments.count else { return nil }
+    guard let id = UUID(uuidString: CommandLine.arguments[index + 1]) else { exit(2) }
+    return id.uuidString.lowercased()
+}()
+let previewMetadata = previewID.map { "\(runDir)/view-\($0).json" }
+let framePath = previewID.map { "\(runDir)/view-\($0).jpg" } ?? "\(runDir)/frame.jpg", cursorPath = "\(runDir)/cursor.json", statusPath = "\(runDir)/status.txt"
 
 func readJSON(_ p: String) -> [String: Any] {
     guard let d = fm.contents(atPath: p), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
@@ -24,13 +30,14 @@ func hexColor(_ hex: String) -> NSColor {
 }
 
 struct Cfg: Equatable {
-    var enabled = true, mode = "attached", attachTo = "Claude", anchor = "bottom-right"
+    var enabled = true, mode = "normal", attachTo = "", anchor = "bottom-right"
     var hideWhenHostInactive = true, clickThrough = false, showAgentCursor = true
     var margin: CGFloat = 16, width: CGFloat = 460, opacity: CGFloat = 1, cornerRadius: CGFloat = 10
     var controlsCorner = "top-left", glyphClose = "xmark", glyphAction = "hand.raised", glyphTint = "auto"
     var glyphSize: CGFloat = 20, glyphInset: CGFloat = 14, glyphGap: CGFloat = 26, scrimOpacity: CGFloat = 0.38
     var hoverFadeIn = 0.12, hoverFadeOut = 0.25, cursorColor = "#339cff"
     var webPort = 47821
+    var hostPid: Int32?, hostWindowID: UInt32?
 
     static func load() -> Cfg {
         let all = readJSON(configPath)
@@ -50,6 +57,14 @@ struct Cfg: Equatable {
         c.scrimOpacity = n("scrimOpacity") ?? c.scrimOpacity; c.cursorColor = s("cursorColor") ?? c.cursorColor
         c.hoverFadeIn = Double(n("hoverFadeIn") ?? CGFloat(c.hoverFadeIn)); c.hoverFadeOut = Double(n("hoverFadeOut") ?? CGFloat(c.hoverFadeOut))
         if let w = all["web"] as? [String: Any], let p = w["port"] as? NSNumber { c.webPort = p.intValue }
+        c.hostPid = (h["hostPid"] as? NSNumber)?.int32Value
+        c.hostWindowID = (h["hostWindowId"] as? NSNumber)?.uint32Value
+        if let metadata = previewMetadata {
+            let host = readJSON(metadata)["host"] as? [String: Any] ?? [:]
+            c.hostPid = (host["pid"] as? NSNumber)?.int32Value
+            c.hostWindowID = (host["windowId"] as? NSNumber)?.uint32Value
+            c.enabled = true; c.mode = c.hostPid == nil ? "normal" : "attached"
+        }
         return c
     }
 }
@@ -312,7 +327,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controls.layer?.addSublayer(scrim)
 
         closeGlyph = Glyph(symbol: cfg.glyphClose, size: cfg.glyphSize)
-        closeGlyph.onClick = { NSApp.terminate(nil) }
+        closeGlyph.onClick = {
+            if let metadata = previewMetadata { try? fm.removeItem(atPath: metadata) }
+            NSApp.terminate(nil)
+        }
         actionGlyph = Glyph(symbol: cfg.glyphAction, size: cfg.glyphSize)
         actionGlyph.onClick = { [weak self] in self?.takeOver() }
         controls.addSubview(closeGlyph); controls.addSubview(actionGlyph)
@@ -325,11 +343,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Take over: open the live, interactive browser view (or bring the native app forward).
     func takeOver() {
-        let src = readJSON(cursorPath)["source"] as? String
-        if src == "native", let pid = (readJSON(cursorPath)["app"] as? NSNumber)?.int32Value,
-           let app = NSRunningApplication(processIdentifier: pid) {
-            app.activate(); return
+        let target = readJSON(previewMetadata ?? "\(runDir)/target.json")
+        if target["pid"] != nil {
+            DispatchQueue.global().async {
+                func failure(_ message: String) { DispatchQueue.main.async {
+                    let alert = NSAlert(); alert.messageText = "Cannot take over this window"; alert.informativeText = message; alert.runModal()
+                } }
+                let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+                guard fd >= 0 else { failure("Cannot create local connection"); return }
+                defer { close(fd) }
+                var timeout = timeval(tv_sec: 3, tv_usec: 0)
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+                var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+                let bytes = Array("\(runDir)/agent.sock".utf8)
+                guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { failure("Socket path is too long"); return }
+                withUnsafeMutableBytes(of: &address.sun_path) { b in b.copyBytes(from: bytes); b[bytes.count] = 0 }
+                let connected = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+                guard connected == 0 else { failure("CuaAgent is not reachable"); return }
+                var request = target; request["cmd"] = "activateWindow"; request["id"] = 1
+                guard var data = try? JSONSerialization.data(withJSONObject: request) else { failure("Invalid target"); return }
+                data.append(10)
+                let sent = data.withUnsafeBytes { b -> Bool in
+                    var offset = 0
+                    while offset < data.count {
+                        let n = write(fd, b.baseAddress!.advanced(by: offset), data.count - offset)
+                        if n < 0 && errno == EINTR { continue }
+                        if n <= 0 { return false }; offset += n
+                    }
+                    return true
+                }
+                guard sent else { failure("Connection closed; not retried"); return }
+                var buffer = [UInt8](repeating: 0, count: 4096), response = Data()
+                while !response.contains(10) && response.count < 65536 {
+                    let n = read(fd, &buffer, buffer.count)
+                    if n <= 0 { failure("No confirmation received; not retried"); return }
+                    response.append(buffer, count: n)
+                }
+                guard let result = try? JSONSerialization.jsonObject(with: response) as? [String: Any], result["ok"] as? Bool == true else {
+                    let result = (try? JSONSerialization.jsonObject(with: response)) as? [String: Any]
+                    failure(result?["error"] as? String ?? "Invalid helper response"); return
+                }
+            }
+            return
         }
+        if previewID != nil { return }
         let token = (try? String(contentsOfFile: "\(runDir)/token", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if let url = URL(string: "http://127.0.0.1:\(cfg.webPort)/?t=\(token)") { NSWorkspace.shared.open(url) }
     }
@@ -393,6 +450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func tickFrame() {
+        if let metadata = previewMetadata, !fm.fileExists(atPath: metadata) { NSApp.terminate(nil); return }
+        if !fm.fileExists(atPath: framePath) { imageView.image = nil; lastFrame = nil; cursor.hide() }
         if let a = try? fm.attributesOfItem(atPath: framePath), let stamp = a[.modificationDate] as? Date, stamp != lastFrame,
            let d = fm.contents(atPath: framePath), let img = NSImage(data: d), img.size.width > 1 {
             lastFrame = stamp
@@ -405,6 +464,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         let c = readJSON(cursorPath)
+        if let metadata = previewMetadata {
+            let target = readJSON(metadata)
+            guard (c["app"] as? NSNumber) == (target["pid"] as? NSNumber),
+                  (c["windowId"] as? NSNumber) == (target["windowId"] as? NSNumber) else { cursor.hide(); return }
+        }
         if let t = (c["t"] as? NSNumber)?.doubleValue, t != lastCursorT,
            let x = (c["x"] as? NSNumber)?.doubleValue, let y = (c["y"] as? NSNumber)?.doubleValue {
             lastCursorT = t
@@ -414,18 +478,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func hostWindow() -> CGRect? {
+        if let metadata = previewMetadata, let pid = cfg.hostPid {
+            let host = readJSON(metadata)["host"] as? [String: Any] ?? [:]
+            guard let launch = NSRunningApplication(processIdentifier: pid)?.launchDate,
+                  host["process"] as? String == "\(pid):\(launch.timeIntervalSince1970)" else { return nil }
+        }
         guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
               let screen = NSScreen.screens.first else { return nil }
-        var best: CGRect?
+        var matches: [CGRect] = []
         for w in info {
-            guard let owner = w[kCGWindowOwnerName as String] as? String, owner.localizedCaseInsensitiveContains(cfg.attachTo),
+            let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+            let ownerMatches = cfg.hostPid.map { (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == $0 }
+                ?? (!cfg.attachTo.isEmpty && owner.localizedCaseInsensitiveCompare(cfg.attachTo) == .orderedSame)
+            guard ownerMatches,
+                  cfg.hostWindowID.map({ (w[kCGWindowNumber as String] as? NSNumber)?.uint32Value == $0 }) ?? true,
                   (w[kCGWindowLayer as String] as? Int) == 0,
                   let b = w[kCGWindowBounds as String] as? [String: Double], let x = b["X"], let y = b["Y"], let bw = b["Width"], let bh = b["Height"],
                   bw * bh > 100_000 else { continue }
             let r = CGRect(x: x, y: Double(screen.frame.height) - y - bh, width: bw, height: bh)
-            if best == nil || r.width * r.height > best!.width * best!.height { best = r }
+            matches.append(r)
         }
-        return best
+        return matches.count == 1 ? matches[0] : nil
     }
 
     func tickConfig() {
@@ -440,11 +513,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard cfg.mode == "attached" else { if !window.isVisible { window.orderFrontRegardless() }; return }
         if cfg.hideWhenHostInactive {
             let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
-            let active = front.localizedCaseInsensitiveContains(cfg.attachTo) || NSApp.isActive
+            let active = (cfg.hostPid.map { NSWorkspace.shared.frontmostApplication?.processIdentifier == $0 }
+                ?? (!cfg.attachTo.isEmpty && front.localizedCaseInsensitiveCompare(cfg.attachTo) == .orderedSame)) || NSApp.isActive
             if active { if !window.isVisible { window.orderFrontRegardless() } } else if window.isVisible { window.orderOut(nil) }
             if !active { return }
         }
-        guard !userMoved, let host = hostWindow() else { return }
+        guard let host = hostWindow() else { window.orderOut(nil); return }
+        guard !userMoved else { return }
         let s = window.frame.size, m = cfg.margin
         let p: NSPoint
         switch cfg.anchor {
@@ -458,6 +533,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+signal(SIGPIPE, SIG_IGN)
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

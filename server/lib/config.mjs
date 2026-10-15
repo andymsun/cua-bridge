@@ -39,8 +39,8 @@ export const defaults = {
   stream: { fps: 30, quality: 72, maxWidth: 1280 },
   hud: {
     enabled: true,
-    mode: "attached",            // attached | overlay | normal
-    attachTo: "Claude",
+    mode: "normal",              // attached | overlay | normal
+    attachTo: "",
     anchor: "bottom-right",
     hideWhenHostInactive: true,
     margin: 16,

@@ -1,7 +1,4 @@
-// Client for CuaAgent.app, the Swift helper that holds the Accessibility and
-// Screen Recording grants. Talks JSON lines over a unix socket. The agent acts
-// through the Accessibility API and process-targeted events only - it never
-// moves the user's cursor or sends global input.
+// Native input and capture share a process identity, window and snapshot.
 import { execFile } from "node:child_process";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -13,132 +10,142 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const agentApp = process.env.CUA_AGENT_APP ?? path.join(os.homedir(), "Applications/CuaAgent.app");
 
 export class NativeClient {
-  #sock = null; #buf = ""; #id = 0; #pending = new Map(); #connecting = null;
-
+  #sock = null; #id = 0; #pending = new Map(); #connecting = null;
   constructor(hooks = {}) { this.hooks = hooks; }
-
   get connected() { return !!this.#sock && !this.#sock.destroyed; }
 
   async ensure() {
-    if (this.#sock && !this.#sock.destroyed) return;
+    if (this.connected) return;
     this.#connecting ??= this.#connect().finally(() => { this.#connecting = null; });
     return this.#connecting;
   }
-
   async #connect() {
     for (let attempt = 0; attempt < 60; attempt++) {
       try { await this.#open(); return; } catch {}
-      if (attempt === 0) execFile("open", ["-g", "-j", agentApp], () => {});   // background, never activates
+      if (attempt === 0) execFile("open", ["-g", "-j", agentApp], () => {});
       await sleep(150);
     }
     throw new Error(`CuaAgent is not reachable. Is ${agentApp} installed?`);
   }
-
   #open() {
-    return new Promise((res, rej) => {
-      const s = net.createConnection(paths.agentSock);
-      s.once("connect", () => { this.#sock = s; res(); });
-      s.once("error", rej);
-      s.on("data", (d) => this.#onData(d));
-      s.on("close", () => {
-        for (const p of this.#pending.values()) p.rej(new Error("CuaAgent disconnected"));
-        this.#pending.clear();
-        this.#sock = null;
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection(paths.agentSock);
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.once("connect", () => { this.#sock = socket; resolve(); });
+      socket.on("error", reject);
+      socket.on("data", (data) => {
+        buffer += data;
+        if (buffer.length > (32 << 20)) { socket.destroy(new Error("Oversized CuaAgent response")); return; }
+        let end;
+        while ((end = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+          if (!line.trim()) continue;
+          let msg;
+          try { msg = JSON.parse(line); } catch { socket.destroy(new Error("Invalid CuaAgent response")); return; }
+          const pending = this.#pending.get(msg.id);
+          if (!pending || pending.socket !== socket) continue;
+          this.#pending.delete(msg.id);
+          msg.ok ? pending.resolve(msg.result) : pending.reject(Object.assign(new Error(msg.error), { code: msg.code ?? "native_error" }));
+        }
+      });
+      socket.on("close", () => {
+        for (const [id, pending] of this.#pending) if (pending.socket === socket) {
+          this.#pending.delete(id); pending.reject(new Error("CuaAgent disconnected; actions were not retried"));
+        }
+        if (this.#sock === socket) this.#sock = null;
       });
     });
   }
-
-  #onData(d) {
-    this.#buf += d.toString();
-    let i;
-    while ((i = this.#buf.indexOf("\n")) >= 0) {
-      const line = this.#buf.slice(0, i); this.#buf = this.#buf.slice(i + 1);
-      if (!line.trim()) continue;
-      const msg = JSON.parse(line);
-      const p = this.#pending.get(msg.id);
-      if (!p) continue;
-      this.#pending.delete(msg.id);
-      msg.ok ? p.res(msg.result) : p.rej(new Error(msg.error));
-    }
-  }
-
   async req(cmd, args = {}, timeoutMs = 20000) {
     await this.ensure();
-    const id = ++this.#id;
-    return new Promise((res, rej) => {
-      const t = setTimeout(() => { this.#pending.delete(id); rej(new Error(`CuaAgent ${cmd}: timed out`)); }, timeoutMs);
-      this.#pending.set(id, { res: (v) => { clearTimeout(t); res(v); }, rej: (e) => { clearTimeout(t); rej(e); } });
-      this.#sock.write(JSON.stringify({ id, cmd, ...args }) + "\n");
+    return this.#request(cmd, args, timeoutMs);
+  }
+  #request(cmd, args, timeoutMs) {
+    const id = ++this.#id, socket = this.#sock;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        socket.destroy();
+        reject(new Error(`CuaAgent ${cmd}: timed out; an in-flight action may have occurred and was not retried`));
+      }, timeoutMs);
+      this.#pending.set(id, { socket,
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      socket.write(JSON.stringify({ ...args, id, cmd }) + "\n");
     });
   }
-
-  /** Report on the agent without launching it (launching triggers permission prompts). */
+  /** Passive: never launches a helper, even when a connection fails mid-request. */
   async status() {
     if (!this.connected) { try { await this.#open(); } catch { return { reachable: false }; } }
-    return { reachable: true, ...(await this.req("status")) };
+    return { reachable: true, ...(await this.#request("status", {}, 3000)) };
   }
+  close() { this.#sock?.destroy(); }
+  views() { return this.req("views"); }
+  detach(viewId) { return this.req("detach", { viewId }); }
   apps() { return this.req("apps"); }
-  async app(query) {
+  async app(query, { windowId } = {}) {
     if (!config().native.enabled) throw new Error("Native app control is disabled in settings");
+    if (windowId != null && (!Number.isInteger(windowId) || windowId <= 0)) throw new Error("windowId must be a positive integer");
     const info = await this.req("resolve", { query: String(query) });
-    return new App(this, info);
+    return new App(this, { ...info, windowId });
   }
 }
 
 export class App {
-  #client; #baseline = null; #gen = 0;
-  constructor(client, info) { this.#client = client; this.info = info; }
+  #client; #baseline = null; #gen = null;
+  constructor(client, info) { this.#client = client; this.info = { ...info }; }
   get pid() { return this.info.pid; }
   get name() { return this.info.name; }
-
+  get target() { return { pid: this.pid, process: this.info.process, windowId: this.info.windowId, generation: this.#gen }; }
+  windows() { return this.#client.req("windows", this.target); }
+  window(windowId) {
+    if (!Number.isInteger(windowId) || windowId <= 0) throw new Error("windowId must be a positive integer");
+    return new App(this.#client, { ...this.info, windowId });
+  }
   #touch(center, kind = "click") {
     this.#client.hooks.onActive?.(this);
-    if (center) this.#client.hooks.onCursor?.({ ...center, kind, app: this.pid });
+    if (center) this.#client.hooks.onCursor?.({ ...center, kind, app: this.pid, windowId: this.info.windowId });
   }
-
   async #snap() {
-    const cfg = config().native;
-    const r = await this.#client.req("snapshot", { pid: this.pid, maxDepth: cfg.maxDepth });
-    this.#gen = r.generation;
-    return r;
+    const previous = this.#gen;
+    const result = await this.#client.req("snapshot", { ...this.target, maxDepth: config().native.maxDepth });
+    this.#gen = result.generation;
+    this.info.windowId = result.windowId;
+    if (previous) this.#client.req("releaseSnapshot", { generation: previous }).catch(() => {});
+    return result;
   }
-
   async read({ full = false } = {}) {
+    const result = await this.#snap();
     this.#touch();
-    const cfg = config().native;
-    const r = await this.#snap();
-    const header = `App ${this.name} (pid ${this.pid}) · window "${r.title ?? ""}"`;
-    const rendered = render(r.entries, { maxLines: cfg.maxLines, header, focused: r.focused });
-    const d = !full && config().snapshot.diff ? diff(this.#baseline, r.entries, { maxLines: cfg.maxLines }) : null;
-    this.#baseline = r.entries.map((e) => e.text);
-    return d ? `${header}\n${d}` : rendered.text;
+    const header = `App ${this.name} (pid ${this.pid}) · window ${result.windowId} "${result.title ?? ""}"`;
+    const rendered = render(result.entries, { maxLines: config().native.maxLines, header, focused: result.focused });
+    const delta = !full && config().snapshot.diff ? diff(this.#baseline, result.entries, { maxLines: config().native.maxLines }) : null;
+    this.#baseline = result.entries.map((entry) => entry.text);
+    return delta ? `${header}\n${delta}` : rendered.text;
   }
-
   async find(query) {
-    const r = await this.#snap();
+    const result = await this.#snap();
     const re = query instanceof RegExp ? query : new RegExp(String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    return r.entries.map((e, i) => `${i + 1} ${e.text}`).filter((l) => re.test(l)).join("\n") || "(no match)";
+    return result.entries.map((entry, index) => `${index + 1} ${entry.text}`).filter((line) => re.test(line)).join("\n") || "(no match)";
   }
-
   async #act(cmd, args, kind) {
+    if (!this.#gen) throw new Error("Read the selected window before acting (and read again after each action)");
+    const target = this.target;
     this.lastActionAt = Date.now();
-    const r = await this.#client.req(cmd, { pid: this.pid, generation: this.#gen, ...args }).catch((e) => {
-      if (/unknown command/.test(e.message)) {
-        throw new Error("This needs the updated CuaAgent: run ~/.local/share/cua-bridge/install.sh, then turn CuaAgent back on in System Settings > Privacy & Security > Accessibility and Screen Recording.");
-      }
-      throw e;
-    });
-    this.#touch(r?.center, kind);
-    return r?.result;
+    // Never replay input, and invalidate indices even when an action partially fails.
+    this.#gen = null;
+    try {
+      const result = await this.#client.req(cmd, { ...target, ...args });
+      if (result?.center) this.#client.hooks.onCursor?.({ ...result.center, kind, app: this.pid, windowId: this.info.windowId });
+      return result?.result;
+    } finally { this.#client.req("releaseSnapshot", { generation: target.generation }).catch(() => {}); }
   }
-
-  // element index -> AX press; [x, y] (window points) -> AX hit-test, then press.
-  // button "right" shows the element's menu; count 2 opens it.
   click(target, { button = "left", count = 1 } = {}) {
-    const extra = button === "left" && count === 1 ? {} : { button, count };
     return Array.isArray(target)
-      ? this.#act("pressAt", { x: target[0], y: target[1], ...extra }, "click")
-      : this.#act("press", { index: target, ...extra }, "click");
+      ? this.#act("pressAt", { x: target[0], y: target[1], button, count }, "click")
+      : this.#act("press", { index: target, button, count }, "click");
   }
   scrollAt(x, y, direction = "down", pages = 1) { return this.#act("scrollAt", { x, y, direction, pages }, "scroll"); }
   selectText(index, text, { prefix = "", suffix = "", selectionType = "text" } = {}) {
@@ -156,8 +163,13 @@ export class App {
     if (!config().native.allowKeyEvents) throw new Error("Key events are disabled in settings (native.allowKeyEvents)");
     return this.#act("pressKey", { index: index ?? null, combo }, "move");
   }
+  async attach({ host } = {}) {
+    if (!this.#gen) await this.#snap();
+    return this.#client.req("attach", { ...this.target, ...(host ? { host } : {}) }, 30000);
+  }
   async screenshot() {
-    const r = await this.#client.req("screenshot", { pid: this.pid }, 30000);
-    return Buffer.from(r.jpeg, "base64");
+    if (!this.#gen) await this.#snap();
+    const result = await this.#client.req("screenshot", this.target, 30000);
+    return Buffer.from(result.jpeg, "base64");
   }
 }
