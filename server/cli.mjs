@@ -37,6 +37,7 @@ async function start() {
 const cmd = process.argv[2] ?? "status";
 const ok = (b, s) => `${b ? "✓" : "✗"} ${s}`;
 
+try {
 switch (cmd) {
   case "start": await start(); console.log("cua daemon running"); break;
   case "stop": if (await up()) await post("/shutdown").catch(() => {}); console.log("cua daemon stopped"); break;
@@ -148,3 +149,7 @@ switch (cmd) {
     console.log("usage: cua status|start|stop|restart|ui|settings|doctor|use|toggle\nnative: cua apps|windows APP|attach APP --window ID [--host APP --host-window ID]|views|detach ID\npermissions: cua permissions accessibility|screen-recording");
 }
 process.exit(0);
+} catch (error) {
+  console.error(`cua: ${error.code ? `[${error.code}] ` : ""}${error.message}`);
+  process.exit(1);
+}
