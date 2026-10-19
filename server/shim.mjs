@@ -104,4 +104,7 @@ process.stdin.on("data", (d) => {
     if (line) { try { handle(JSON.parse(line)); } catch {} }
   }
 });
-process.stdin.on("end", async () => { try { await post("/end", { session: SESSION }, 2000); } catch {} process.exit(0); });
+// End this session's REPL and cursor however the harness stops us: closed stdin or a signal.
+const end = async () => { try { await post("/end", { session: SESSION }, 2000); } catch {} process.exit(0); };
+process.stdin.on("end", end);
+for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(signal, end);

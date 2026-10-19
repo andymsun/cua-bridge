@@ -768,8 +768,9 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
                 } else { mark.ring.opacity = 0 }
             }
         }
-        // quit after a quiet minute; the daemon relaunches on the next point
-        if cursors.isEmpty { emptySince = emptySince ?? now; if now.timeIntervalSince(emptySince!) > 60 { NSApp.terminate(nil) } } else { emptySince = nil }
+        // quit after a quiet minute (idle cursors count as quiet); the daemon relaunches on the next point
+        let live = cursors.values.contains { now.timeIntervalSince1970 - ((($0["t"] as? NSNumber)?.doubleValue ?? 0) / 1000) < idle }
+        if !live { emptySince = emptySince ?? now; if now.timeIntervalSince(emptySince!) > 60 { NSApp.terminate(nil) } } else { emptySince = nil }
     }
 }
 

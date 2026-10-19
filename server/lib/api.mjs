@@ -61,7 +61,11 @@ export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
 
     // This session's own cursor on the user's screen.
     const me = pointers.session();
+    // Guide mode: this session shows the person what to do and never does it for them.
+    let guiding = false;
+    const guard = (cmd) => { if (guiding) throw new Error(`guide mode: point at it and let the person do it (${cmd} was not sent). cua.guide.stop() ends guide mode.`); };
     const follow = (a) => {
+      a.beforeAct = guard;
       a.onPointer = (target, kind) => { if (config().pointer.followActions) pointers.move(me, target, { kind: kind === "click" ? "click" : "move" }); };
       return a;
     };
@@ -108,6 +112,11 @@ export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
       point,
       highlight: (a, at, text) => pointAt(a, at, text, { highlight: true }),
       pointer: { hide: () => pointers.hide(me) },
+      guide: {
+        start() { guiding = true; return "guide mode on: point, highlight and waitForChange; clicks and typing are refused"; },
+        stop() { guiding = false; pointers.hide(me); return "guide mode off"; },
+        get active() { return guiding; },
+      },
       ui: () => { write(`Live browser: ${urls().browser}\nSettings: ${urls().settings}`); return urls(); },
       config: () => config(),
       setConfig: (patch) => saveConfig(deepMerge(config(), patch)),

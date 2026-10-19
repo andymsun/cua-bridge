@@ -102,7 +102,10 @@ export class App {
   windows() { return this.#client.req("windows", this.target); }
   window(windowId) {
     if (!Number.isInteger(windowId) || windowId <= 0) throw new Error("windowId must be a positive integer");
-    return new App(this.#client, { ...this.info, windowId });
+    const w = new App(this.#client, { ...this.info, windowId });
+    // the session's guard and cursor carry over to the chosen window
+    w.beforeAct = this.beforeAct; w.onPointer = this.onPointer;
+    return w;
   }
   #touch(center, kind = "click") {
     this.#client.hooks.onActive?.(this);
@@ -131,6 +134,7 @@ export class App {
     return result.entries.map((entry, index) => `${index + 1} ${entry.text}`).filter((line) => re.test(line)).join("\n") || "(no match)";
   }
   async #act(cmd, args, kind) {
+    this.beforeAct?.(cmd);
     if (!this.#gen) throw new Error("Read the selected window before acting (and read again after each action)");
     const target = this.target;
     this.lastActionAt = Date.now();
@@ -166,6 +170,30 @@ export class App {
     if (!config().native.allowKeyEvents) throw new Error("Key events are disabled in settings (native.allowKeyEvents)");
     return this.#act("pressKey", { index: index ?? null, combo }, "move");
   }
+  /**
+   * Wait for the window to change (the user did something), checking every `intervalMs`.
+   * Returns what changed, as read() would after a change; "(timed out)" when nothing did.
+   * Sends no input, so it is how a guide waits for the person to take a step.
+   */
+  async waitForChange({ timeoutMs = 120000, intervalMs = 1000 } = {}) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(intervalMs) || intervalMs < 200) throw new Error("waitForChange needs timeoutMs >= 0 and intervalMs >= 200");
+    if (!this.#baseline) await this.read();
+    const before = this.#baseline.join("\n"), until = Date.now() + timeoutMs;
+    // Accessibility trees (Chromium's especially) shrink and regrow on their own, so a change
+    // counts only once the next read shows the same thing. Diffs are against the starting state.
+    let pending = null;
+    while (Date.now() < until) {
+      await sleep(intervalMs);
+      this.#baseline = before.split("\n");
+      const text = await this.read(), now = this.#baseline.join("\n");
+      if (now === before) { pending = null; continue; }
+      if (now === pending) return text;
+      pending = now;
+    }
+    this.#baseline = before.split("\n");
+    return "(timed out)";
+  }
+
   /** Where element `index` (or window point [x, y]) is, normalised to the window. Sends no input. */
   async locate(at) {
     if (Array.isArray(at)) {

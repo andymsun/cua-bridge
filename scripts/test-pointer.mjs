@@ -58,3 +58,34 @@ pointers.shutdown();
 assert.equal(fs.existsSync(file), false, "daemon shutdown removes the feed, which ends the overlay");
 console.log("PASS pointer");
 fs.rmSync(temporary, { recursive: true, force: true });
+
+// Guide mode and waiting for the person: real App objects over a fake helper.
+{
+  const { App } = await import("../server/lib/native.mjs");
+  let snaps = 0, sent = [];
+  const client = { hooks: {}, async req(cmd, args) {
+    if (cmd === "snapshot") { snaps++; return { generation: `g${snaps}`, windowId: 5, title: "Fixture",
+      // snapshot 3 is a transient shrink (the tree regrowing), not something the person did
+      entries: snaps === 3 ? [] : [{ indent: 0, text: snaps < 5 ? 'button "Create pull request"' : 'text "Pull request opened"', ref: 0 }] }; }
+    if (cmd !== "releaseSnapshot") sent.push(cmd); return { center: { x: 0.5, y: 0.5 } };
+  } };
+  const g = new Pointers();
+  const { cua } = makeApiFactory({ engine: {}, native: { app: async () => new App(client, { pid: 1, process: "1:x", name: "Fixture" }) },
+    hud: {}, urls: () => ({}), pw: {}, pointers: g })({ write() {}, image() {} });
+  const app = await cua.app("Fixture");
+  await app.read({ emit: false });
+  cua.guide.start();
+  await assert.rejects(app.click(0), /guide mode/, "guide mode refuses input");
+  await assert.rejects(app.window(5).click(0), /guide mode/, "including on a chosen window");
+  assert.deepEqual(sent, [], "nothing reached the helper");
+  const changed = await app.waitForChange({ timeoutMs: 5000, intervalMs: 200 });
+  assert.match(changed, /Pull request opened/, "a transient shrink is not a step; a lasting change is");
+  assert.ok(snaps >= 6, "the change was confirmed by a second read");
+  assert.equal(await app.waitForChange({ timeoutMs: 300, intervalMs: 200 }), "(timed out)");
+  cua.guide.stop();
+  await app.read({ emit: false });
+  await app.click(0);
+  assert.deepEqual(sent, ["press"], "input works again after guide mode");
+  g.shutdown();
+  console.log("PASS guide mode");
+}

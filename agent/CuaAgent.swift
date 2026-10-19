@@ -130,6 +130,14 @@ func enableAppAX(_ pid: pid_t) -> Bool {
     return manual || chromium
 }
 
+/// macOS answers Accessibility with nothing while the screen is locked: say so instead of
+/// reporting an app with no windows.
+func requireUnlocked() throws {
+    if (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool == true {
+        throw AgentError("The screen is locked, so apps can't be read or driven; unlock the Mac and try again", code: "screen_locked")
+    }
+}
+
 @_silgen_name("_AXUIElementGetWindow") func _AXUIElementGetWindow(_ el: AXUIElement, _ wid: UnsafeMutablePointer<CGWindowID>) -> AXError
 func windowID(of el: AXUIElement) -> CGWindowID? {
     let win = axString(el, kAXRoleAttribute) == "AXWindow" ? el : ax(el, kAXWindowAttribute).map { $0 as! AXUIElement }
@@ -194,6 +202,7 @@ func checkProcess(_ pid: pid_t, _ expected: String?) throws {
 
 func windows(_ pid: pid_t) throws -> [[String: Any]] {
     guard AXIsProcessTrusted() else { throw AgentError("Accessibility is not granted; run cua permissions accessibility", code: "permission_denied") }
+    try requireUnlocked()
     let identity = try processIdentity(pid)
     if enableAppAX(pid) { usleep(500_000) }
     return ((ax(appElement(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? []).compactMap { w in
@@ -205,6 +214,7 @@ func windows(_ pid: pid_t) throws -> [[String: Any]] {
 }
 
 func selectedWindow(_ pid: pid_t, _ id: CGWindowID?) throws -> AXUIElement {
+    try requireUnlocked()
     let list = (ax(appElement(pid), kAXWindowsAttribute) as? [AXUIElement]) ?? []
     if let id = id {
         guard let w = list.first(where: { windowID(of: $0) == id }) else {
