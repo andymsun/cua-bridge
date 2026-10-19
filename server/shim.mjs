@@ -9,9 +9,11 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDirs, paths } from "./lib/config.mjs";
+import { hostInfo } from "./lib/host.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SESSION = randomUUID();
+const HOST = hostInfo();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function post(route, body, timeoutMs = 600000) {
@@ -82,7 +84,7 @@ async function handle(msg) {
       }
       if (params.name === "js") {
         const a = params.arguments ?? {};
-        const r = await post("/call", { session: SESSION, code: a.code, timeout_ms: a.timeout_ms });
+        const r = await post("/call", { session: SESSION, code: a.code, timeout_ms: a.timeout_ms, host: HOST });
         return send({ jsonrpc: "2.0", id, result: r });
       }
       return send({ jsonrpc: "2.0", id, error: { code: -32602, message: `unknown tool ${params.name}` } });
@@ -102,4 +104,7 @@ process.stdin.on("data", (d) => {
     if (line) { try { handle(JSON.parse(line)); } catch {} }
   }
 });
-process.stdin.on("end", async () => { try { await post("/end", { session: SESSION }, 2000); } catch {} process.exit(0); });
+// End this session's REPL and cursor however the harness stops us: closed stdin or a signal.
+const end = async () => { try { await post("/end", { session: SESSION }, 2000); } catch {} process.exit(0); };
+process.stdin.on("end", end);
+for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(signal, end);

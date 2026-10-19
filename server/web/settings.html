@@ -69,10 +69,10 @@ const T = "{{TOKEN}}";
 const api = (p, body) => fetch(p + "?t=" + T, body !== undefined ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}).then((r) => r.json());
 
 const SECTIONS = { browser: "Browser", snapshot: "Reading pages & apps", native: "Native apps", stream: "Live stream",
-  hud: "HUD", web: "Web UI", repl: "Sessions" };
+  hud: "HUD", pointer: "On-screen pointer", web: "Web UI", repl: "Sessions" };
 const ENUMS = {
   "browser.dialogs": ["report", "accept", "dismiss"],
-  "hud.mode": ["attached", "overlay", "normal"],
+  "hud.mode": ["auto", "attached", "overlay", "normal"],
   "hud.anchor": ["bottom-right", "bottom-left", "top-right", "top-left", "center"],
   "hud.controlsCorner": ["top-left", "top-right", "bottom-left", "bottom-right"],
   "hud.glyphTint": ["auto", "light", "dark"],
@@ -87,11 +87,14 @@ const HELP = {
   "browser.dialogs": "What to do with alert/confirm/prompt dialogs.",
   "snapshot.diff": "Return only what changed since the last read.",
   "native.allowKeyEvents": "Keyboard events sent to the target app only - never global.",
-  "hud.mode": "attached pins to the host app and hides with it; overlay floats above everything.",
+  "hud.mode": "auto follows the app the agent was started from (VS Code, a terminal, the Claude app…) and hides with it; attached pins to the app named below; overlay floats above everything.",
   "hud.attachTo": "App the HUD attaches to (Claude, Antigravity, Cursor…).",
   "hud.showAgentCursor": "Draw the agent's own cursor on the preview.",
   "hud.glyphClose": "Any SF Symbol name.", "hud.glyphAction": "Any SF Symbol name.",
   "web.port": "Takes effect after the daemon restarts.",
+  "pointer.enabled": "Each agent session's own cursor on your screen. Click-through; your cursor is never moved.",
+  "pointer.followActions": "The agent's cursor also glides to each native click and keystroke target.",
+  "pointer.colors": "One colour per agent session, in order.",
 };
 
 let current, defaults;

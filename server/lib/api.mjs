@@ -5,7 +5,7 @@ import { config, saveConfig } from "./config.mjs";
 import { makeCodexApi } from "./codex.mjs";
 import { makeSky } from "./sky.mjs";
 
-export function makeApiFactory({ engine, native, hud, urls, pw }) {
+export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
   return ({ write, image }) => {
     const emitting = (obj) => new Proxy(obj, {
       get(target, prop) {
@@ -31,6 +31,7 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
     });
 
     const opened = new Set();   // tabs this session created; closed at session end unless kept
+    const attached = new Set(); // native previews are owned by this REPL session
     let hinted = false;         // live-view hint goes out once per session
     const hint = () => {
       if (hinted) return;
@@ -58,8 +59,37 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
       get running() { return engine.running; },
     };
 
+    // This session's own cursor on the user's screen.
+    const me = pointers.session();
+    // Guide mode: this session shows the person what to do and never does it for them.
+    let guiding = false;
+    const guard = (cmd) => { if (guiding) throw new Error(`guide mode: point at it and let the person do it (${cmd} was not sent). cua.guide.stop() ends guide mode.`); };
+    const follow = (a) => {
+      a.beforeAct = guard;
+      a.onPointer = (target, kind) => { if (config().pointer.followActions) pointers.move(me, target, { kind: kind === "click" ? "click" : "move" }); };
+      return a;
+    };
+    /** Point at element `at` (an index from the last read) or [x, y] in the window, saying why. */
+    const pointAt = async (a, at, text, { highlight = false } = {}) => {
+      const where = await a.locate(at);
+      const target = where.rect && !highlight
+        ? { windowId: where.windowId, x: where.rect.x + where.rect.w / 2, y: where.rect.y + where.rect.h / 2 }
+        : where;
+      if (!pointers.move(me, target, { text, kind: where.rect && highlight ? "rect" : "point" })) return "pointer is off in settings (pointer.enabled)";
+      return `pointing at ${Array.isArray(at) ? `(${at[0]}, ${at[1]})` : `element ${at}`} in ${a.name}${text ? `: ${text}` : ""}`;
+    };
+    const point = async (target, at, text, opts) => {
+      if (target && typeof target.locate === "function") return pointAt(target, at, text, opts);
+      // a screen point in global points, top-left origin (what CGWindow bounds use)
+      if (Number.isFinite(target?.x) && Number.isFinite(target?.y)) {
+        if (!pointers.move(me, { screen: [target.x, target.y] }, { text: at })) return "pointer is off in settings (pointer.enabled)";
+        return `pointing at screen (${target.x}, ${target.y})${at ? `: ${at}` : ""}`;
+      }
+      throw new Error("point(app, index | [x, y], label) or point({ x, y }, label)");
+    };
+
     const apps = async () => native.apps();
-    const app = async (query) => emitting(await native.app(query));
+    const app = async (query, options) => follow(emitting(await native.app(query, options)));
 
     const api = {
       browser,
@@ -70,6 +100,22 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
       hud: {
         status: (text) => hud.status(text),
         show: () => hud.launch(true),
+        async attach(app, { host } = {}) {
+          const view = await app.attach({ host: host?.target ?? host });
+          try { await hud.showView(view.id); } catch (error) { await native.detach(view.id); throw error; }
+          attached.add(view.id);
+          return view;
+        },
+        views: () => native.views(),
+        async detach(id) { const result = await native.detach(id); attached.delete(id); return result; },
+      },
+      point,
+      highlight: (a, at, text) => pointAt(a, at, text, { highlight: true }),
+      pointer: { hide: () => pointers.hide(me) },
+      guide: {
+        start() { guiding = true; return "guide mode on: point, highlight and waitForChange; clicks and typing are refused"; },
+        stop() { guiding = false; pointers.hide(me); return "guide mode off"; },
+        get active() { return guiding; },
       },
       ui: () => { write(`Live browser: ${urls().browser}\nSettings: ${urls().settings}`); return urls(); },
       config: () => config(),
@@ -79,6 +125,9 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
     Object.defineProperty(api, "__dispose", {
       enumerable: false,
       value: async () => {
+        pointers.end(me);
+        for (const id of attached) await native.detach(id).catch(() => {});
+        attached.clear();
         if (!config().browser.closeTabsOnSessionEnd) return;
         for (const t of opened) if (!t.kept && engine.tabs.has(t.id)) await t.close().catch(() => {});
       },
@@ -89,7 +138,7 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
       write: (v) => write(v),
       emitImage: ({ bytes, mimeType = "image/png" }) => image(bytes, mimeType),
     };
-    return { cua: api, agent, sky: makeSky({ native }), nodeRepl, setupBrowserRuntime: async () => agent };
+    return { cua: api, agent, sky: makeSky({ native, onApp: follow, pointAt }), nodeRepl, setupBrowserRuntime: async () => agent };
   };
 }
 

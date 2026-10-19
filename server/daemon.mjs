@@ -9,6 +9,7 @@ import { config, ensureDirs, paths } from "./lib/config.mjs";
 import { BrowserEngine } from "./lib/browser.mjs";
 import { NativeClient } from "./lib/native.mjs";
 import { Hud } from "./lib/hud.mjs";
+import { Pointers } from "./lib/pointer.mjs";
 import { Session } from "./lib/repl.mjs";
 import { makeApiFactory } from "./lib/api.mjs";
 import { startWeb } from "./lib/web.mjs";
@@ -24,6 +25,7 @@ if (!token) { token = randomBytes(16).toString("hex"); fs.writeFileSync(paths.to
 
 let web = null;
 const hud = new Hud();
+const pointers = new Pointers();
 const engine = new BrowserEngine({
   onFrame: (buf) => { hud.frame(buf); web?.frame(buf); },
   onCursor: (c) => { hud.cursor(c); web?.cursor(c); },
@@ -49,7 +51,7 @@ const urls = () => {
   return { browser: `http://127.0.0.1:${port}/?t=${token}`, settings: `http://127.0.0.1:${port}/settings?t=${token}` };
 };
 const pw = new PlaywrightBridge(engine);
-const makeApi = makeApiFactory({ engine, native, hud, urls, pw });
+const makeApi = makeApiFactory({ engine, native, hud, urls, pw, pointers });
 const sessions = new Map();
 const session = (id) => { if (!sessions.has(id)) sessions.set(id, new Session(id, makeApi)); return sessions.get(id); };
 
@@ -81,6 +83,7 @@ const control = http.createServer(async (req, res) => {
     if (req.url === "/health") return reply(200, { ok: true, pid: process.pid });
     if (req.url === "/status") return reply(200, await status());
     if (req.url === "/call") {
+      hud.setHost(msg.host);
       const cfg = config().repl;
       const r = await session(msg.session).run(msg.code, {
         timeoutMs: msg.timeout_ms ?? cfg.timeoutMs, maxOutputChars: cfg.maxOutputChars,
@@ -103,6 +106,7 @@ web.listen().then((r) => {
 async function shutdown() {
   log("shutting down");
   await engine.shutdown().catch(() => {});
+  pointers.shutdown();
   try { fs.unlinkSync(paths.daemonSock); } catch {}
   process.exit(0);
 }

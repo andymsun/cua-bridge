@@ -3,14 +3,14 @@
 # found, and install the Claude Code skill. Safe to re-run.
 #
 #   ./install.sh                 install / update
-#   ./install.sh --rebuild-agent also rebuild CuaAgent (you will need to re-grant its permissions)
+#   ./install.sh --rebuild-agent accepted for compatibility; native builds are always verified
 #   ./install.sh --with-codex    also register with Codex
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 APPS="$HOME/Applications"
-REBUILD_AGENT=0; WITH_CODEX=0
-for a in "$@"; do case "$a" in --rebuild-agent) REBUILD_AGENT=1;; --with-codex) WITH_CODEX=1;; esac; done
+WITH_CODEX=0
+for a in "$@"; do case "$a" in --rebuild-agent) :;; --with-codex) WITH_CODEX=1;; *) printf 'Unknown option: %s\n' "$a" >&2; exit 2;; esac; done
 say() { printf '  %s\n' "$*"; }
 
 [ "$(uname)" = "Darwin" ] || { echo "macOS only."; exit 1; }
@@ -21,37 +21,8 @@ command -v npm >/dev/null || { echo "npm is required (it ships with Node.js)."; 
 command -v swiftc >/dev/null || { echo "Xcode command line tools required: xcode-select --install"; exit 1; }
 
 echo "==> native apps"
-mkdir -p "$APPS" "$REPO/build"
-mkapp() { # name source bundle-id
-  local name="$1" src="$2" id="$3" app="$APPS/$1.app"
-  local hash; hash="$(shasum -a 256 "$src" | cut -c1-16)"
-  if [ "$name" = CuaAgent ] && [ "$REBUILD_AGENT" = 0 ] && [ -d "$app" ] \
-     && [ "$(/usr/libexec/PlistBuddy -c 'Print :CuaSourceHash' "$app/Contents/Info.plist" 2>/dev/null)" = "$hash" ]; then
-    say "$name.app unchanged - kept, so its permissions stay granted"; return
-  fi
-  swiftc -O -swift-version 5 -o "$REPO/build/$name" "$src" 2>&1 | grep -E "error" && exit 1 || true
-  pkill -x "$name" 2>/dev/null || true
-  rm -rf "$app"; mkdir -p "$app/Contents/MacOS"
-  cp "$REPO/build/$name" "$app/Contents/MacOS/$name"
-  cat > "$app/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>$name</string>
-  <key>CFBundleIdentifier</key><string>$id</string>
-  <key>CFBundleExecutable</key><string>$name</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>2.0</string>
-  <key>LSUIElement</key><true/>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <key>CuaSourceHash</key><string>$hash</string>
-</dict></plist>
-PLIST
-  codesign --force --deep -s - "$app" >/dev/null 2>&1 || true
-  say "built $name.app"
-}
-mkapp CuaAgent "$REPO/agent/CuaAgent.swift" com.andymsun.cua.agent
-mkapp CuaPreview "$REPO/hud/CuaPreview.swift" com.andymsun.cua.preview
+# Setup/trust is deliberately separate: installing must never silently create an identity.
+python3 "$REPO/scripts/build-native.py" --apps-dir "$APPS"
 
 echo "==> dependencies"
 ( cd "$REPO" && npm install --omit=dev --no-audit --no-fund --silent ) && say "playwright-core (locators run on cua's own browser; no browser download)"
@@ -75,7 +46,8 @@ register_json() { # label file
   "$NODE" -e '
     const fs = require("fs"), [file, node, shim] = process.argv.slice(1);
     const real = fs.existsSync(file) ? fs.realpathSync(file) : file;
-    let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(real, "utf8") || "{}"); } catch {}
+    let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(real, "utf8")); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (!cfg || Array.isArray(cfg) || typeof cfg !== "object") throw new Error("Invalid config; refusing to overwrite");
     cfg.mcpServers = { ...(cfg.mcpServers || {}), cua: { command: node, args: [shim] } };
     fs.mkdirSync(require("path").dirname(real), { recursive: true });
     fs.writeFileSync(real, JSON.stringify(cfg, null, 2) + "\n");
@@ -109,10 +81,12 @@ cat <<'NEXT'
 ==> done
   Browser control works now. Restart your harness so it loads the `cua` server.
 
-  For native apps, grant CuaAgent.app (once per machine):
-    System Settings > Privacy & Security > Accessibility     > enable CuaAgent
-    System Settings > Privacy & Security > Screen Recording  > enable CuaAgent
-  It asks for both the first time an app is driven. Check with: cua doctor
+  For native apps, explicitly request each permission when ready:
+    cua permissions accessibility
+    cua permissions screen-recording
+  Grant CuaAgent in System Settings > Privacy & Security. Migrating from an
+  ad-hoc build may require a new grant. Startup and doctor never request access.
+  Keep the same signing identity and installation path on future upgrades.
 
   Settings UI: cua settings      Live browser: cua ui
   Switch agents to the harness's built-in browser and back: cua toggle
