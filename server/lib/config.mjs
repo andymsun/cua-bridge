@@ -20,6 +20,8 @@ export const paths = {
   get state() { return path.join(this.run, "state.json"); },
   get status() { return path.join(this.run, "status.txt"); },
   get target() { return path.join(this.run, "target.json"); },
+  get host() { return path.join(this.run, "host.json"); },
+  get pointers() { return path.join(this.run, "pointers.json"); },
   get log() { return path.join(this.run, "daemon.log"); },
 };
 
@@ -39,7 +41,7 @@ export const defaults = {
   stream: { fps: 30, quality: 72, maxWidth: 1280 },
   hud: {
     enabled: true,
-    mode: "normal",              // attached | overlay | normal
+    mode: "auto",                // auto (follows the app the agent was started from) | attached | overlay | normal
     attachTo: "",
     anchor: "bottom-right",
     hideWhenHostInactive: true,
@@ -60,6 +62,14 @@ export const defaults = {
     scrimOpacity: 0.38,
     hoverFadeIn: 0.12,
     hoverFadeOut: 0.25,
+  },
+  pointer: {
+    enabled: true,               // the agent's own cursors on your screen (click-through; your cursor is never moved)
+    followActions: true,         // a session's cursor also glides to each native click and keystroke target
+    labelSeconds: 6,             // how long a pointing label and highlight stay up
+    idleSeconds: 8,              // a cursor fades after this long without a new target
+    scale: 1.0,
+    colors: ["#339cff", "#ff8a3d", "#36c46f", "#c46bff", "#ff4f7b", "#e8c547"],
   },
   web: { port: 47821, searchEngine: "google" },   // address-bar searches: google | bing | brave | duckduckgo | a URL with %s
   repl: { timeoutMs: 30000, maxOutputChars: 20000 },

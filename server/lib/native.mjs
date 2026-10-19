@@ -138,7 +138,10 @@ export class App {
     this.#gen = null;
     try {
       const result = await this.#client.req(cmd, { ...target, ...args });
-      if (result?.center) this.#client.hooks.onCursor?.({ ...result.center, kind, app: this.pid, windowId: this.info.windowId });
+      if (result?.center) {
+        this.#client.hooks.onCursor?.({ ...result.center, kind, app: this.pid, windowId: this.info.windowId });
+        this.onPointer?.({ windowId: this.info.windowId, x: result.center.x, y: result.center.y }, kind);
+      }
       return result?.result;
     } finally { this.#client.req("releaseSnapshot", { generation: target.generation }).catch(() => {}); }
   }
@@ -162,6 +165,16 @@ export class App {
   pressKey(index, combo) {
     if (!config().native.allowKeyEvents) throw new Error("Key events are disabled in settings (native.allowKeyEvents)");
     return this.#act("pressKey", { index: index ?? null, combo }, "move");
+  }
+  /** Where element `index` (or window point [x, y]) is, normalised to the window. Sends no input. */
+  async locate(at) {
+    if (Array.isArray(at)) {
+      if (!this.#gen) await this.#snap();
+      return this.#client.req("locate", { ...this.target, x: at[0], y: at[1] });
+    }
+    if (!Number.isInteger(at)) throw new Error("locate needs an element index from the last read, or [x, y] in the window");
+    if (!this.#gen) throw new Error("Read the window first: element indices come from the last read");
+    return this.#client.req("locate", { ...this.target, index: at });
   }
   async attach({ host } = {}) {
     if (!this.#gen) await this.#snap();

@@ -676,6 +676,18 @@ func handle(_ req: [String: Any]) throws -> Any {
         let pt = CGPoint(x: t.window.minX + x, y: t.window.minY + y)
         eventClick(pid: p, at: pt, window: t.windowID, button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
         return ["center": ["x": x / Double(t.window.width), "y": y / Double(t.window.height)]]
+    case "locate":
+        // Read-only, for the on-screen pointer: where an element or point is, normalised to the
+        // selected window so the overlay can follow the window as it moves. No input is sent.
+        let t = try table()
+        guard let window = t.windowID, t.window.width > 0, t.window.height > 0 else { throw AgentError("Window has no usable frame") }
+        if let i = index {
+            guard let f = axFrame(try element(try needPid(), gen, i)), f.width > 0 || f.height > 0 else { throw AgentError("Element has no on-screen frame") }
+            return ["windowId": Int(window), "rect": ["x": Double((f.minX - t.window.minX) / t.window.width), "y": Double((f.minY - t.window.minY) / t.window.height),
+                                                    "w": Double(f.width / t.window.width), "h": Double(f.height / t.window.height)]]
+        }
+        let p = try point("x", "y", t)
+        return ["windowId": Int(window), "x": Double(p.x / t.window.width), "y": Double(p.y / t.window.height)]
     case "focus":
         let e = try el(); axSet(e, kAXFocusedAttribute, kCFBooleanTrue)
         return ["center": center(try needPid(), gen, e) as Any]

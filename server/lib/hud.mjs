@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import { atomicWrite, config, paths } from "./config.mjs";
+import { cleanHost } from "./host.mjs";
 
 export const hudApp = process.env.CUA_HUD_APP ?? path.join(os.homedir(), "Applications/CuaPreview.app");
 
@@ -14,8 +15,19 @@ export class Hud {
   #lastLaunch = 0;
   #native = null;
   #nativePid = null;
+  #host = null;
 
   attachNative(native) { this.#native = native; }
+
+  /** Record the app the latest call came from, for hud.mode "auto". */
+  setHost(host) {
+    const clean = cleanHost(host);
+    if (!clean) return;
+    const json = JSON.stringify(clean);
+    if (json === this.#host) return;
+    this.#host = json;
+    try { atomicWrite(paths.host, json); } catch {}
+  }
 
   frame(buf) {
     if (this.source !== "browser" || !config().hud.enabled) return;
@@ -58,6 +70,8 @@ export class Hud {
     if (!config().hud.enabled && !force) return;
     if (!force && Date.now() - this.#lastLaunch < 30000) return;
     this.#lastLaunch = Date.now();
-    execFile("open", ["-g", hudApp], () => {});   // -g: never activates, never steals focus
+    // -g never activates or steals focus; -n because the pointer overlay is another instance
+    // of the same app. The HUD holds a lock, so an extra launch exits at once.
+    execFile("open", ["-n", "-g", hudApp], () => {});
   }
 }

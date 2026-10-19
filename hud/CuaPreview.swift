@@ -16,10 +16,71 @@ let previewID: String? = {
 }()
 let previewMetadata = previewID.map { "\(runDir)/view-\($0).json" }
 let framePath = previewID.map { "\(runDir)/view-\($0).jpg" } ?? "\(runDir)/frame.jpg", cursorPath = "\(runDir)/cursor.json", statusPath = "\(runDir)/status.txt"
+let hostPath = "\(runDir)/host.json"
 
 func readJSON(_ p: String) -> [String: Any] {
     guard let d = fm.contents(atPath: p), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return [:] }
     return o
+}
+
+/// hud.mode "auto": the app the latest agent call came from. The daemon records the calling
+/// harness's process ancestry (nearest first) and inherited bundle id; the host is the nearest
+/// regular app that has a window, so helpers, shells and the CLI itself are skipped.
+var autoHostCache: (key: Data, pid: Int32)?
+func autoHost() -> Int32? {
+    guard let data = fm.contents(atPath: hostPath) else { return nil }
+    if let c = autoHostCache, c.key == data, NSRunningApplication(processIdentifier: c.pid)?.isTerminated == false { return c.pid }
+    let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+    // Any window counts, not only on-screen ones: the host may be on another Space right now.
+    let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    let owners = Set(windows.filter { ($0[kCGWindowLayer as String] as? Int) == 0 }.compactMap { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value })
+    func usable(_ a: NSRunningApplication) -> Bool { a.activationPolicy == .regular && owners.contains(a.processIdentifier) }
+    var pid = ((o["ancestors"] as? [NSNumber]) ?? []).lazy.compactMap { NSRunningApplication(processIdentifier: $0.int32Value) }.first(where: usable)?.processIdentifier
+    if pid == nil, let id = o["bundleId"] as? String {
+        pid = NSRunningApplication.runningApplications(withBundleIdentifier: id).first(where: usable)?.processIdentifier
+    }
+    // A miss is retried every tick: the host may not have opened a window yet.
+    autoHostCache = pid.map { (data, $0) }
+    return pid
+}
+
+/// Defaults of the keys quick settings writes; values equal to these are not stored,
+/// matching how the daemon saves the config.
+let quickDefaults: [String: Any] = ["mode": "auto", "anchor": "bottom-right", "width": 460, "opacity": 1.0,
+                                    "showAgentCursor": true, "hideWhenHostInactive": true]
+
+func saveHud(_ key: String, _ value: Any) {
+    var all: [String: Any] = [:]
+    if let d = fm.contents(atPath: configPath) {
+        // Never replace a config we cannot read with one that only holds this change.
+        guard let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { NSSound.beep(); return }
+        all = o
+    }
+    var h = all["hud"] as? [String: Any] ?? [:]
+    if let d = quickDefaults[key], NSDictionary(dictionary: ["v": d]).isEqual(to: ["v": value]) { h.removeValue(forKey: key) } else { h[key] = value }
+    if h.isEmpty { all.removeValue(forKey: "hud") } else { all["hud"] = h }
+    guard let data = try? JSONSerialization.data(withJSONObject: all, options: [.prettyPrinted, .sortedKeys]) else { return }
+    try? fm.createDirectory(atPath: (configPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+    do { try (data + Data("\n".utf8)).write(to: URL(fileURLWithPath: configPath), options: .atomic) } catch { NSSound.beep() }
+}
+
+/// Hold an exclusive lock for this process's lifetime; false when another instance has it.
+/// The HUD and the pointer overlay are separate instances of this app, so each takes its own.
+func holdLock(_ name: String) -> Bool {
+    let fd = open("\(runDir)/\(name)", O_CREAT | O_RDWR, 0o600)
+    return fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) == 0   // the descriptor stays open on purpose
+}
+
+/// A menu item that runs a closure.
+final class ClosureItem: NSMenuItem {
+    private let run: () -> Void
+    init(_ title: String, on: Bool = false, _ run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self; state = on ? .on : .off
+    }
+    required init(coder: NSCoder) { fatalError("unused") }
+    @objc private func fire() { run() }
 }
 
 func hexColor(_ hex: String) -> NSColor {
@@ -30,14 +91,16 @@ func hexColor(_ hex: String) -> NSColor {
 }
 
 struct Cfg: Equatable {
-    var enabled = true, mode = "normal", attachTo = "", anchor = "bottom-right"
+    var enabled = true, mode = "auto", attachTo = "", anchor = "bottom-right"
     var hideWhenHostInactive = true, clickThrough = false, showAgentCursor = true
     var margin: CGFloat = 16, width: CGFloat = 460, opacity: CGFloat = 1, cornerRadius: CGFloat = 10
-    var controlsCorner = "top-left", glyphClose = "xmark", glyphAction = "hand.raised", glyphTint = "auto"
+    var controlsCorner = "top-left", glyphClose = "xmark", glyphAction = "hand.raised", glyphSettings = "slider.horizontal.3", glyphTint = "auto"
     var glyphSize: CGFloat = 20, glyphInset: CGFloat = 14, glyphGap: CGFloat = 26, scrimOpacity: CGFloat = 0.38
     var hoverFadeIn = 0.12, hoverFadeOut = 0.25, cursorColor = "#339cff"
     var webPort = 47821
     var hostPid: Int32?, hostWindowID: UInt32?
+    /// Pinned to a host window: explicitly, or by auto once the host app is known.
+    var attached: Bool { mode == "attached" || (mode == "auto" && hostPid != nil) }
 
     static func load() -> Cfg {
         let all = readJSON(configPath)
@@ -52,6 +115,7 @@ struct Cfg: Equatable {
         c.margin = n("margin") ?? c.margin; c.width = n("width") ?? c.width; c.opacity = n("opacity") ?? c.opacity
         c.cornerRadius = n("cornerRadius") ?? c.cornerRadius; c.controlsCorner = s("controlsCorner") ?? c.controlsCorner
         c.glyphClose = s("glyphClose") ?? c.glyphClose; c.glyphAction = s("glyphAction") ?? c.glyphAction
+        c.glyphSettings = s("glyphSettings") ?? c.glyphSettings
         c.glyphTint = s("glyphTint") ?? c.glyphTint; c.glyphSize = n("glyphSize") ?? c.glyphSize
         c.glyphInset = n("glyphInset") ?? c.glyphInset; c.glyphGap = n("glyphGap") ?? c.glyphGap
         c.scrimOpacity = n("scrimOpacity") ?? c.scrimOpacity; c.cursorColor = s("cursorColor") ?? c.cursorColor
@@ -64,6 +128,8 @@ struct Cfg: Equatable {
             c.hostPid = (host["pid"] as? NSNumber)?.int32Value
             c.hostWindowID = (host["windowId"] as? NSNumber)?.uint32Value
             c.enabled = true; c.mode = c.hostPid == nil ? "normal" : "attached"
+        } else if c.mode == "auto" {
+            c.hostPid = autoHost(); c.hostWindowID = nil
         }
         return c
     }
@@ -291,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var cursor: AgentCursor!
     var controls: NSView!
     var scrim: CAGradientLayer!
-    var closeGlyph: Glyph!, actionGlyph: Glyph!
+    var closeGlyph: Glyph!, actionGlyph: Glyph!, settingsGlyph: Glyph!
     var cfg = Cfg.load()
     var lastFrame: Date?, lastCursorT: Double = 0
     var hovering = false, userMoved = false
@@ -299,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if previewID == nil, !holdLock("hud.lock") { exit(0) }   // one HUD; per-view previews are independent
         window = NSPanel(contentRect: NSRect(x: 0, y: 0, width: cfg.width, height: cfg.width * 0.625),
                          styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.becomesKeyOnlyIfNeeded = true; window.hidesOnDeactivate = false
@@ -333,7 +400,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         actionGlyph = Glyph(symbol: cfg.glyphAction, size: cfg.glyphSize)
         actionGlyph.onClick = { [weak self] in self?.takeOver() }
-        controls.addSubview(closeGlyph); controls.addSubview(actionGlyph)
+        settingsGlyph = Glyph(symbol: cfg.glyphSettings, size: cfg.glyphSize)
+        settingsGlyph.onClick = { [weak self] in self?.showQuickSettings() }
+        controls.addSubview(closeGlyph); controls.addSubview(actionGlyph); controls.addSubview(settingsGlyph)
 
         applyChrome(); layoutControls()
         window.center(); window.orderFrontRegardless()
@@ -391,6 +460,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let url = URL(string: "http://127.0.0.1:\(cfg.webPort)/?t=\(token)") { NSWorkspace.shared.open(url) }
     }
 
+    /// The settings people change while watching, one click away from the card.
+    func showQuickSettings() {
+        let menu = NSMenu(), current = cfg
+        func header(_ title: String) { menu.addItem(.sectionHeader(title: title)) }
+        func add(_ title: String, on: Bool = false, _ run: @escaping () -> Void) { menu.addItem(ClosureItem(title, on: on, run)) }
+
+        header("Position")
+        let host = cfg.mode == "auto" ? cfg.hostPid.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName } : nil
+        add(host.map { "Follow the app the agent started in (\($0))" } ?? "Follow the app the agent started in", on: cfg.mode == "auto") { saveHud("mode", "auto") }
+        if cfg.mode == "attached" { add("Pinned to \(cfg.attachTo.isEmpty ? "a host window" : cfg.attachTo)", on: true) {} }
+        add("Float above everything", on: cfg.mode == "overlay") { saveHud("mode", "overlay") }
+        add("Ordinary window", on: cfg.mode == "normal") { saveHud("mode", "normal") }
+        if cfg.attached {
+            for (title, value) in [("Top left", "top-left"), ("Top right", "top-right"), ("Bottom left", "bottom-left"), ("Bottom right", "bottom-right"), ("Center", "center")] {
+                add("  \(title)", on: cfg.anchor == value) { [weak self] in self?.userMoved = false; saveHud("anchor", value) }
+            }
+            if userMoved { add("Snap back to the corner") { [weak self] in self?.userMoved = false } }
+        }
+        menu.addItem(.separator())
+        header("Size")
+        for (title, width) in [("Small", 320), ("Medium", 460), ("Large", 640)] {
+            add(title, on: Int(cfg.width) == width) { saveHud("width", width) }
+        }
+        header("Opacity")
+        for percent in [100, 85, 70, 50] {
+            add("\(percent)%", on: Int((cfg.opacity * 100).rounded()) == percent) { saveHud("opacity", Double(percent) / 100) }
+        }
+        menu.addItem(.separator())
+        add("Show the agent's cursor", on: cfg.showAgentCursor) { saveHud("showAgentCursor", !current.showAgentCursor) }
+        if cfg.attached { add("Hide when the app isn't active", on: cfg.hideWhenHostInactive) { saveHud("hideWhenHostInactive", !current.hideWhenHostInactive) } }
+        menu.addItem(.separator())
+        add("All settings…") {
+            let token = (try? String(contentsOfFile: "\(runDir)/token", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if let url = URL(string: "http://127.0.0.1:\(current.webPort)/settings?t=\(token)") { NSWorkspace.shared.open(url) }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: settingsGlyph.frame.minX, y: settingsGlyph.frame.minY), in: controls)
+    }
+
     func setHover(_ on: Bool) {
         guard hovering != on else { return }
         hovering = on
@@ -403,10 +510,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applyChrome() {
         window.alphaValue = cfg.opacity
         window.ignoresMouseEvents = cfg.clickThrough
-        window.level = cfg.mode == "normal" ? .normal : .floating
-        window.collectionBehavior = cfg.mode == "attached" ? [.managed, .fullScreenAuxiliary] : [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.level = cfg.attached || cfg.mode == "overlay" ? .floating : .normal
+        window.collectionBehavior = cfg.attached ? [.managed, .fullScreenAuxiliary] : [.canJoinAllSpaces, .fullScreenAuxiliary]
         surface.layer?.cornerRadius = cfg.cornerRadius
-        closeGlyph.symbol = cfg.glyphClose; actionGlyph.symbol = cfg.glyphAction
+        closeGlyph.symbol = cfg.glyphClose; actionGlyph.symbol = cfg.glyphAction; settingsGlyph.symbol = cfg.glyphSettings
         cursor.isHidden = !cfg.showAgentCursor
     }
 
@@ -416,6 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let y = top ? h - cfg.glyphInset - gs : cfg.glyphInset
         closeGlyph.frame = NSRect(x: left ? cfg.glyphInset : w - cfg.glyphInset - gs, y: y, width: gs, height: gs)
         actionGlyph.frame = NSRect(x: left ? cfg.glyphInset + cfg.glyphGap : w - cfg.glyphInset - gs - cfg.glyphGap, y: y, width: gs, height: gs)
+        settingsGlyph.frame = NSRect(x: left ? cfg.glyphInset + 2 * cfg.glyphGap : w - cfg.glyphInset - gs - 2 * cfg.glyphGap, y: y, width: gs, height: gs)
         scrim.frame = CGRect(x: left ? 0 : w - 220, y: top ? h - 150 : 0, width: 220, height: 150)
         scrim.startPoint = CGPoint(x: left ? 0 : 1, y: top ? 1 : 0)
         scrim.endPoint = CGPoint(x: left ? 0.62 : 0.38, y: top ? 0.15 : 0.85)
@@ -444,7 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         } else { light = cfg.glyphTint == "dark" }
         let tint: NSColor = light ? .black : .white
-        closeGlyph.tint = tint; actionGlyph.tint = tint
+        closeGlyph.tint = tint; actionGlyph.tint = tint; settingsGlyph.tint = tint
         let base: CGFloat = light ? 1 : 0
         scrim.colors = [NSColor(calibratedWhite: base, alpha: cfg.scrimOpacity).cgColor, NSColor(calibratedWhite: base, alpha: 0).cgColor]
     }
@@ -498,19 +606,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let r = CGRect(x: x, y: Double(screen.frame.height) - y - bh, width: bw, height: bh)
             matches.append(r)
         }
-        return matches.count == 1 ? matches[0] : nil
+        // auto follows the host app's front window (the list is front to back); explicit
+        // attachment never guesses between several windows.
+        return cfg.mode == "auto" ? matches.first : matches.count == 1 ? matches[0] : nil
     }
 
     func tickConfig() {
         let c = Cfg.load()
         if c != cfg {
             let widthChanged = c.width != cfg.width
+            if c.hostPid != cfg.hostPid { userMoved = false }   // a new host: snap to it
             cfg = c; applyChrome()
             if widthChanged { var f = window.frame; f.size.width = c.width; window.setFrame(f, display: true) }
             layoutControls()
         }
         if !cfg.enabled { if window.isVisible { window.orderOut(nil) }; return }
-        guard cfg.mode == "attached" else { if !window.isVisible { window.orderFrontRegardless() }; return }
+        guard cfg.attached else { if !window.isVisible { window.orderFrontRegardless() }; return }
         if cfg.hideWhenHostInactive {
             let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
             let active = (cfg.hostPid.map { NSWorkspace.shared.frontmostApplication?.processIdentifier == $0 }
@@ -533,8 +644,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - on-screen pointer (`--pointer`)
+
+/// A click-through layer over one screen. Never key, never main, never in the way.
+final class OverlayWindow: NSWindow {
+    init(screen: NSScreen) {
+        super.init(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        isOpaque = false; backgroundColor = .clear; hasShadow = false
+        level = .screenSaver; ignoresMouseEvents = true; hidesOnDeactivate = false; isReleasedWhenClosed = false
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
+        setFrame(screen.frame, display: false)
+    }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+final class FlippedView: NSView { override var isFlipped: Bool { true } }
+
+/// One agent's cursor on one screen: the spring arrow, a label pill and a highlight ring.
+final class PointerMark {
+    let cursor: AgentCursor, pill = NSTextField(labelWithString: ""), ring = CAShapeLayer()
+    let color: NSColor
+    var shownAt: Date?, labelUntil = Date.distantPast
+    init(in view: NSView, color: NSColor, scale: CGFloat) {
+        self.color = color
+        cursor = AgentCursor(frame: view.bounds, color: color)
+        cursor.autoresizingMask = [.width, .height]
+        view.addSubview(cursor)
+        ring.fillColor = color.withAlphaComponent(0.10).cgColor; ring.strokeColor = color.cgColor; ring.lineWidth = 2.5
+        ring.shadowColor = color.cgColor; ring.shadowOpacity = 0.8; ring.shadowRadius = 8; ring.shadowOffset = .zero; ring.opacity = 0
+        view.layer?.addSublayer(ring)
+        pill.font = .systemFont(ofSize: 13 * scale, weight: .semibold); pill.textColor = .white
+        pill.wantsLayer = true; pill.layer?.backgroundColor = color.withAlphaComponent(0.92).cgColor
+        pill.layer?.cornerRadius = 9 * scale; pill.alignment = .center; pill.isHidden = true
+        view.addSubview(pill)
+    }
+    func remove() { cursor.removeFromSuperview(); pill.removeFromSuperview(); ring.removeFromSuperlayer() }
+}
+
+final class PointerOverlay: NSObject, NSApplicationDelegate {
+    let path = "\(runDir)/pointers.json"
+    var windows: [(screen: NSScreen, window: OverlayWindow, view: FlippedView)] = []
+    var marks: [String: [Int: PointerMark]] = [:]          // cursor id -> screen index -> mark
+    var seen: [String: Double] = [:]                         // cursor id -> last target time
+    var emptySince: Date?
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        guard holdLock("pointer.lock") else { exit(0) }   // one overlay; a second launch leaves it alone
+        buildWindows()
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.buildWindows() }
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
+    }
+
+    func buildWindows() {
+        for m in marks.values.flatMap({ $0.values }) { m.remove() }
+        marks = [:]; seen = [:]
+        windows.forEach { $0.window.orderOut(nil) }
+        windows = NSScreen.screens.map { s in
+            let w = OverlayWindow(screen: s), v = FlippedView(frame: NSRect(origin: .zero, size: s.frame.size))
+            v.wantsLayer = true; w.contentView = v; w.orderFrontRegardless()
+            return (s, w, v)
+        }
+    }
+
+    /// Global top-left points (CGWindow space) for a target, following its window as it moves.
+    func resolve(_ t: [String: Any]) -> (point: CGPoint, rect: CGRect?)? {
+        if let s = t["screen"] as? [NSNumber], s.count == 2 { return (CGPoint(x: s[0].doubleValue, y: s[1].doubleValue), nil) }
+        guard let id = (t["windowId"] as? NSNumber)?.uint32Value,
+              let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]])?.first,
+              (info[kCGWindowIsOnscreen as String] as? Bool) == true,
+              let b = info[kCGWindowBounds as String] as? [String: Double], let x = b["X"], let y = b["Y"], let w = b["Width"], let h = b["Height"] else { return nil }
+        if let r = t["rect"] as? [String: NSNumber] {
+            let rect = CGRect(x: x + (r["x"]?.doubleValue ?? 0) * w, y: y + (r["y"]?.doubleValue ?? 0) * h,
+                              width: (r["w"]?.doubleValue ?? 0) * w, height: (r["h"]?.doubleValue ?? 0) * h)
+            return (CGPoint(x: rect.midX, y: rect.midY), rect)
+        }
+        guard let nx = (t["x"] as? NSNumber)?.doubleValue, let ny = (t["y"] as? NSNumber)?.doubleValue else { return nil }
+        return (CGPoint(x: x + nx * w, y: y + ny * h), nil)
+    }
+
+    /// Global top-left point -> point in one screen's flipped view (nil when on another screen).
+    func local(_ p: CGPoint, _ s: NSScreen) -> CGPoint? {
+        let top = NSScreen.screens.first?.frame.maxY ?? s.frame.maxY
+        let q = CGPoint(x: p.x - s.frame.minX, y: p.y - (top - s.frame.maxY))
+        return q.x >= -40 && q.y >= -40 && q.x <= s.frame.width + 40 && q.y <= s.frame.height + 40 ? q : nil
+    }
+
+    func tick() {
+        // the daemon removes the file on shutdown: nothing left to draw
+        guard fm.fileExists(atPath: path) else { NSApp.terminate(nil); return }
+        let doc = readJSON(path)
+        let cursors = doc["cursors"] as? [String: [String: Any]] ?? [:]
+        let labelSeconds = (doc["labelSeconds"] as? NSNumber)?.doubleValue ?? 6, idle = (doc["idleSeconds"] as? NSNumber)?.doubleValue ?? 8
+        let scale = CGFloat((doc["scale"] as? NSNumber)?.doubleValue ?? 1)
+        let now = Date()
+        for (id, perScreen) in marks where cursors[id] == nil { perScreen.values.forEach { $0.remove() }; marks[id] = nil; seen[id] = nil }
+        for (id, c) in cursors {
+            guard let target = c["target"] as? [String: Any], let at = resolve(target) else { marks[id]?.values.forEach { $0.cursor.hide() }; continue }
+            let t = (c["t"] as? NSNumber)?.doubleValue ?? 0, fresh = seen[id] != t
+            seen[id] = t
+            let kind = c["kind"] as? String ?? "point", text = c["label"] as? String ?? ""
+            let color = hexColor(c["color"] as? String ?? "#339cff")
+            let age = now.timeIntervalSince1970 - t / 1000
+            for (i, entry) in windows.enumerated() {
+                let mark = marks[id]?[i] ?? { let m = PointerMark(in: entry.view, color: color, scale: scale); marks[id, default: [:]][i] = m; return m }()
+                guard let p = local(at.point, entry.screen), age < idle else { mark.cursor.hide(); mark.pill.isHidden = true; mark.ring.opacity = 0; continue }
+                // the arrow's tip sits on the target; moves follow the target as its window moves
+                mark.cursor.move(to: p, click: fresh && kind == "click")
+                if fresh { mark.labelUntil = now.addingTimeInterval(text.isEmpty && kind != "rect" ? 0 : labelSeconds) }
+                let showLabel = now < mark.labelUntil
+                mark.pill.isHidden = !(showLabel && !text.isEmpty)
+                if !mark.pill.isHidden {
+                    mark.pill.stringValue = text
+                    let size = mark.pill.intrinsicContentSize
+                    mark.pill.frame = NSRect(x: p.x + 18 * scale, y: p.y + 14 * scale, width: size.width + 18 * scale, height: size.height + 8 * scale)
+                }
+                if let r = at.rect, kind == "rect", showLabel, let o = local(CGPoint(x: r.minX, y: r.minY), entry.screen) {
+                    CATransaction.begin(); CATransaction.setDisableActions(true)
+                    mark.ring.path = CGPath(roundedRect: CGRect(x: o.x - 4, y: o.y - 4, width: r.width + 8, height: r.height + 8), cornerWidth: 8, cornerHeight: 8, transform: nil)
+                    CATransaction.commit()
+                    mark.ring.opacity = 1
+                } else { mark.ring.opacity = 0 }
+            }
+        }
+        // quit after a quiet minute; the daemon relaunches on the next point
+        if cursors.isEmpty { emptySince = emptySince ?? now; if now.timeIntervalSince(emptySince!) > 60 { NSApp.terminate(nil) } } else { emptySince = nil }
+    }
+}
+
 signal(SIGPIPE, SIG_IGN)
 let app = NSApplication.shared
-let delegate = AppDelegate()
+let pointerMode = CommandLine.arguments.contains("--pointer")
+let delegate: NSApplicationDelegate = pointerMode ? PointerOverlay() : AppDelegate()
 app.delegate = delegate
 app.run()

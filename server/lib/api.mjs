@@ -5,7 +5,7 @@ import { config, saveConfig } from "./config.mjs";
 import { makeCodexApi } from "./codex.mjs";
 import { makeSky } from "./sky.mjs";
 
-export function makeApiFactory({ engine, native, hud, urls, pw }) {
+export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
   return ({ write, image }) => {
     const emitting = (obj) => new Proxy(obj, {
       get(target, prop) {
@@ -59,8 +59,33 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
       get running() { return engine.running; },
     };
 
+    // This session's own cursor on the user's screen.
+    const me = pointers.session();
+    const follow = (a) => {
+      a.onPointer = (target, kind) => { if (config().pointer.followActions) pointers.move(me, target, { kind: kind === "click" ? "click" : "move" }); };
+      return a;
+    };
+    /** Point at element `at` (an index from the last read) or [x, y] in the window, saying why. */
+    const pointAt = async (a, at, text, { highlight = false } = {}) => {
+      const where = await a.locate(at);
+      const target = where.rect && !highlight
+        ? { windowId: where.windowId, x: where.rect.x + where.rect.w / 2, y: where.rect.y + where.rect.h / 2 }
+        : where;
+      if (!pointers.move(me, target, { text, kind: where.rect && highlight ? "rect" : "point" })) return "pointer is off in settings (pointer.enabled)";
+      return `pointing at ${Array.isArray(at) ? `(${at[0]}, ${at[1]})` : `element ${at}`} in ${a.name}${text ? `: ${text}` : ""}`;
+    };
+    const point = async (target, at, text, opts) => {
+      if (target && typeof target.locate === "function") return pointAt(target, at, text, opts);
+      // a screen point in global points, top-left origin (what CGWindow bounds use)
+      if (Number.isFinite(target?.x) && Number.isFinite(target?.y)) {
+        if (!pointers.move(me, { screen: [target.x, target.y] }, { text: at })) return "pointer is off in settings (pointer.enabled)";
+        return `pointing at screen (${target.x}, ${target.y})${at ? `: ${at}` : ""}`;
+      }
+      throw new Error("point(app, index | [x, y], label) or point({ x, y }, label)");
+    };
+
     const apps = async () => native.apps();
-    const app = async (query, options) => emitting(await native.app(query, options));
+    const app = async (query, options) => follow(emitting(await native.app(query, options)));
 
     const api = {
       browser,
@@ -80,6 +105,9 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
         views: () => native.views(),
         async detach(id) { const result = await native.detach(id); attached.delete(id); return result; },
       },
+      point,
+      highlight: (a, at, text) => pointAt(a, at, text, { highlight: true }),
+      pointer: { hide: () => pointers.hide(me) },
       ui: () => { write(`Live browser: ${urls().browser}\nSettings: ${urls().settings}`); return urls(); },
       config: () => config(),
       setConfig: (patch) => saveConfig(deepMerge(config(), patch)),
@@ -88,6 +116,7 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
     Object.defineProperty(api, "__dispose", {
       enumerable: false,
       value: async () => {
+        pointers.end(me);
         for (const id of attached) await native.detach(id).catch(() => {});
         attached.clear();
         if (!config().browser.closeTabsOnSessionEnd) return;
@@ -100,7 +129,7 @@ export function makeApiFactory({ engine, native, hud, urls, pw }) {
       write: (v) => write(v),
       emitImage: ({ bytes, mimeType = "image/png" }) => image(bytes, mimeType),
     };
-    return { cua: api, agent, sky: makeSky({ native }), nodeRepl, setupBrowserRuntime: async () => agent };
+    return { cua: api, agent, sky: makeSky({ native, onApp: follow, pointAt }), nodeRepl, setupBrowserRuntime: async () => agent };
   };
 }
 

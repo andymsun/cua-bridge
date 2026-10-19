@@ -9,9 +9,11 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureDirs, paths } from "./lib/config.mjs";
+import { hostInfo } from "./lib/host.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const SESSION = randomUUID();
+const HOST = hostInfo();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function post(route, body, timeoutMs = 600000) {
@@ -82,7 +84,7 @@ async function handle(msg) {
       }
       if (params.name === "js") {
         const a = params.arguments ?? {};
-        const r = await post("/call", { session: SESSION, code: a.code, timeout_ms: a.timeout_ms });
+        const r = await post("/call", { session: SESSION, code: a.code, timeout_ms: a.timeout_ms, host: HOST });
         return send({ jsonrpc: "2.0", id, result: r });
       }
       return send({ jsonrpc: "2.0", id, error: { code: -32602, message: `unknown tool ${params.name}` } });

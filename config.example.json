@@ -30,7 +30,7 @@
   },
   "hud": {
     "enabled": true,
-    "mode": "normal",
+    "mode": "auto",
     "attachTo": "",
     "anchor": "bottom-right",
     "hideWhenHostInactive": true,
@@ -51,6 +51,14 @@
     "scrimOpacity": 0.38,
     "hoverFadeIn": 0.12,
     "hoverFadeOut": 0.25
+  },
+  "pointer": {
+    "enabled": true,
+    "followActions": true,
+    "labelSeconds": 6,
+    "idleSeconds": 8,
+    "scale": 1.0,
+    "colors": ["#339cff", "#ff8a3d", "#36c46f", "#c46bff", "#ff4f7b", "#e8c547"]
   },
   "web": {
     "port": 47821,

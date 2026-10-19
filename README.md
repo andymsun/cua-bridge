@@ -263,14 +263,21 @@ applies to new agent sessions, so restart any harness window that's already open
 active browser tab, or the native window when it's working in an app. It draws the agent's
 cursor and click ripples on top.
 
-- **Hover** to show the controls: close, and take over. Take over opens the live view, or
-  brings the native app forward.
+- **Hover** to show the controls: close, take over, and quick settings. Take over opens the
+  live view, or brings the native app forward. Quick settings switches position, corner,
+  size, opacity and the agent cursor without opening the settings page.
 - **Drag** it from anywhere on the card.
 - **Modes:**
+  - `auto` (the default) follows the app the agent was started from: VS Code or its
+    terminal, Terminal, Ghostty, the Claude app, or any other app. Each call reports the
+    harness's process ancestry, and the HUD pins itself to the nearest regular app with a
+    window, follows that app's front window and hides when it isn't active. When the chain
+    is broken (a tmux or herdr server), the bundle id macOS passed to the shell is used;
+    with neither, the HUD is an ordinary window.
   - `attached` pins the HUD to one explicit host window (terminal, IDE or app), and
     hides it when that app isn't active.
   - `overlay` floats the HUD above everything.
-  - `normal` (the default) makes it an ordinary draggable window without assuming a host.
+  - `normal` makes it an ordinary draggable window without assuming a host.
 - Size, corner, opacity, glyphs, tint, scrim and fade timings are all configurable.
 
 Independent native previews do not replace each other:
@@ -287,6 +294,25 @@ Use IDs returned by `windows`. The captured target and positioning host are dist
 Multiple windows are never selected by largest-window or frontmost fallback.
 See the [native API guide](server/docs/computer-use.md) for per-session previews.
 
+## On-screen pointer
+
+Each agent session also gets its own cursor on your real screen, in its own colour, drawn
+by a click-through overlay above everything (`CuaPreview --pointer`). Your cursor is never
+moved and nothing is clicked by it; it is how an agent shows you things:
+
+```js
+const mail = await cua.app("Mail"); await mail.read();
+await cua.point(mail, 14, "the archive button");   // glide there and say why
+await cua.highlight(mail, 22, "this thread");      // ring a region
+await cua.point({ x: 1200, y: 18 }, "menu bar clock");   // a screen point
+cua.pointer.hide();
+```
+
+Element targets follow their window when it moves. With `pointer.followActions`, the cursor
+also glides to each native click and keystroke target, so you can watch several agents work
+at once. Labels and rings fade after `pointer.labelSeconds`; an idle cursor fades after
+`pointer.idleSeconds`. The overlay quits after a quiet minute and returns on the next point.
+
 ## Configuration
 
 `cua settings` opens the settings page, and changes apply live. The file lives at
@@ -300,6 +326,7 @@ See the [native API guide](server/docs/computer-use.md) for per-session previews
 | `native` | `enabled`, `allowKeyEvents`, `maxDepth`, `maxLines` |
 | `stream` | `fps` (default 30), `quality`, `maxWidth` |
 | `hud` | `enabled`, `mode`, `attachTo`, `anchor`, `hideWhenHostInactive`, `width`, `opacity`, `cornerRadius`, `clickThrough`, `showAgentCursor`, `controlsCorner`, glyph and fade options |
+| `pointer` | `enabled`, `followActions`, `labelSeconds`, `idleSeconds`, `scale`, `colors` |
 | `web` | `port` (default 47821) |
 | `repl` | `timeoutMs`, `maxOutputChars` |
 

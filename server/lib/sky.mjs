@@ -38,7 +38,7 @@ async function installedApps() {
   return installed;
 }
 
-export function makeSky({ native }) {
+export function makeSky({ native, onApp, pointAt }) {
   const byPid = new Map();         // keep one App per process so reads diff against the last one
   const app = async (query, windowId) => {
     if (!query) throw new Error("Pass the app: a display name, bundle id or app path");
@@ -47,6 +47,7 @@ export function makeSky({ native }) {
     const known = byPid.get(key);
     if (known) return known;
     byPid.set(key, a);
+    onApp?.(a);
     return a;
   };
   // after an action, give the app a moment before its state is read (Codex waits about a second)
@@ -101,5 +102,12 @@ export function makeSky({ native }) {
     },
     async set_value({ app: q, window_id, element_index, value }) { await (await app(q, window_id)).setValue(element_index, value); },
     async type_text({ app: q, window_id, text }) { await (await app(q, window_id)).typeText(null, text); },
+    /** Show the user something with your own cursor: element_index (or x, y), and why. */
+    async point({ app: q, window_id, element_index, x, y, label, highlight = false }) {
+      const a = await app(q, window_id);
+      const at = element_index ?? (x != null && y != null ? [x, y] : null);
+      if (at == null) throw new Error("point needs element_index or x and y");
+      return pointAt?.(a, at, label, { highlight });
+    },
   };
 }
