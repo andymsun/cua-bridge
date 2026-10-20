@@ -69,6 +69,7 @@ export function startWeb({ engine, native, hud, token, status, companion, agentH
           }
           case "/api/companion/new": { const s = companion.create(data); return json(res, 200, { id: s.id, ...companionState() }); }
           case "/api/companion/send": companion.send(data.id, data); break;
+          case "/api/companion/model": companion.setModel(data.id, data.model); break;
           case "/api/companion/stop": companion.stop(data.id); break;
           case "/api/companion/stop-all": for (const s of companion.sessions.values()) companion.stop(s.id); break;
           case "/api/companion/remove": companion.remove(data.id); break;

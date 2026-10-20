@@ -265,6 +265,12 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func evaluate(_ js: String) { web?.evaluateJavaScript(js) { _, error in if let error = error { NSLog("Companion UI: %@", error.localizedDescription) } } }
     func json(_ value: Any) -> String { guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]), let result = String(data: data, encoding: .utf8) else { return "null" }; return result }
 
+    static func modelDocumentation(_ value: Any?) -> URL? {
+        guard let model = value as? String,
+              let slug = ["codex/gpt-6-astra": "gpt-6-astra", "codex/gpt-5.6-sol": "gpt-5.6-sol"][model] else { return nil }
+        return URL(string: "https://developers.openai.com/api/docs/models/\(slug)")
+    }
+
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == "127.0.0.1",
               message.frameInfo.securityOrigin.port == (pageURL.port ?? 80),
@@ -280,6 +286,10 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             let top=NSScreen.screens.first?.frame.maxY ?? 0, f=screen.visibleFrame, mouse=NSEvent.mouseLocation
             let data:[String:Any] = ["bounds":["x":f.minX,"y":top-f.maxY,"w":f.width,"h":f.height],"start":[mouse.x,top-mouse.y]]
             evaluate("window.baristaDemoContext?.(\(json(data)))")
+        case "modelDocs":
+            if let url = Self.modelDocumentation(body["model"]), !NSWorkspace.shared.open(url) {
+                evaluate("window.baristaNativeError?.(\(json("The browser could not open the model specifications. Open \(url.absoluteString) in your browser.")))")
+            }
         case "composerState": composer.apply(body)
         case "hubState":
             hubClients = Array(((body["hub"] as? [String: Any])?["clients"] as? [[String: Any]] ?? []).prefix(32))

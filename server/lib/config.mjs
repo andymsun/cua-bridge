@@ -76,13 +76,15 @@ export const defaults = {
   repl: { timeoutMs: 30000, maxOutputChars: 20000 },
 };
 
+export const COMPANION_MODELS = Object.freeze(["codex/gpt-6-astra", "codex/gpt-5.6-sol"]);
+
 // A legacy --model argument is still an explicit selection, not a fallback.
-export function companionBackend() {
+export function companionBackend(model) {
   const backend = config().companion;
   if (typeof backend.command !== "string" || !backend.command.trim() || !Array.isArray(backend.args) || backend.args.some(arg => typeof arg !== "string")) throw new Error("Set companion.command to an executable and companion.args to an array of strings");
   if (backend.args.includes("--")) throw new Error("Companion args cannot end option parsing before the pinned model");
-  const approved = new Set(["codex/gpt-6-astra", "codex/gpt-5.6-sol"]);
-  if (!approved.has(backend.model)) throw new Error("Choose an approved companion model: codex/gpt-6-astra or codex/gpt-5.6-sol");
+  const approved = new Set(COMPANION_MODELS);
+  if (!approved.has(backend.model) || (model !== undefined && !approved.has(model))) throw new Error("Choose an approved companion model: codex/gpt-6-astra or codex/gpt-5.6-sol");
   const args = []; let selected;
   for (let i = 0; i < backend.args.length; i++) {
     const arg = backend.args[i], flag = arg.split("=", 1)[0];
@@ -96,7 +98,7 @@ export function companionBackend() {
     }
   }
   if (selected && backend.model !== defaults.companion.model && selected !== backend.model) throw new Error("Conflicting companion model selections");
-  return { command: backend.command, args, model: selected ?? backend.model };
+  return { command: backend.command, args, model: model ?? selected ?? backend.model };
 }
 
 function merge(base, over) {

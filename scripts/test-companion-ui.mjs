@@ -45,6 +45,13 @@ try{
  await page.getByRole('button',{name:'History and settings',exact:true}).click();
  await page.getByRole('button',{name:'New',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('#sessionChoice').options.length===1);
+ const firstModelSession=await page.evaluate(()=>active);
+ await page.getByLabel('Model for next turn',{exact:true}).selectOption('codex/gpt-5.6-sol');
+ await page.waitForFunction(()=>current()?.model==='codex/gpt-5.6-sol');
+ assert.equal(companion.get(firstModelSession).model,'codex/gpt-5.6-sol');
+ const rejected=await fetch(origin+'/api/companion/model',{method:'POST',headers:{'content-type':'application/json','x-cua-token':'test-token'},body:JSON.stringify({id:firstModelSession,model:'unapproved'})});
+ assert.equal(rejected.status,500);assert.match((await rejected.json()).error,/model/i);
+ assert.equal(companion.get(firstModelSession).model,'codex/gpt-5.6-sol','API rejects a model outside the allowlist');
  await page.getByText('Place an area by coordinates',{exact:true}).click();await page.locator('#areaX').fill('-1200');
  await page.getByRole('button',{name:'Show area',exact:true}).click();await page.locator('#area').waitFor({state:'visible'});
  assert.deepEqual(Object.values(pointers.snapshot().cursors)[0].target.screenRect,{x:-1200,y:100,w:300,h:180});
@@ -90,6 +97,23 @@ try{
  await voicePage.waitForFunction(()=>nativeMessages.filter(m=>m.action.startsWith('voice')).length===2);
  assert.deepEqual(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action.startsWith('voice')).map(m=>m.action)),['voiceStart','voiceCancel'],'a cancelled gesture never sends a phrase');
  assert.equal(await voicePage.locator('#prompt').inputValue(),'Keep draft');
+ await voicePage.evaluate(()=>baristaNativeAdvanced({visible:true}));
+ await voicePage.route('**/api/companion/model',async route=>{
+  const response=await route.fetch();
+  const blocked=await voicePage.evaluate(({a})=>sendPrompt({id:a,prompt:'Do not submit while a model choice is pending'}).then(()=>false,e=>e.message),{a});
+  assert.match(blocked,/model choice/,'native sends cannot race a pending model selection');
+  await voicePage.evaluate(({b})=>baristaNativeSession({id:b}),{b});
+  await route.fulfill({response});
+ });
+ await voicePage.getByLabel('Model for next turn',{exact:true}).selectOption('codex/gpt-5.6-sol');
+ await voicePage.waitForFunction(({a,b})=>active===b&&state.sessions.find(s=>s.id===a)?.model==='codex/gpt-5.6-sol',{a,b});
+ assert.equal(companion.get(a).model,'codex/gpt-5.6-sol');assert.equal(companion.get(b).model,null);
+ assert.equal(await voicePage.getByLabel('Model for next turn',{exact:true}).inputValue(),'','late model responses do not change the new destination');
+ await voicePage.unroute('**/api/companion/model');
+ await voicePage.evaluate(({a})=>baristaNativeSession({id:a}),{a});
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'Keep draft','model changes preserve the native draft');
+ assert.equal(await voicePage.getByLabel('Model for next turn',{exact:true}).inputValue(),'codex/gpt-5.6-sol');
+ await voicePage.evaluate(()=>baristaNativeAdvanced({visible:false}));
  await voicePage.evaluate(async({a,b})=>{
   await baristaNativeVoicePrepare({id:a,captureID:'old-capture',route:'command'});
   baristaVoiceState({captureID:'old-capture',phase:'permission'});
@@ -157,6 +181,10 @@ try{
  companion.clear(b);
  await voicePage.evaluate(()=>baristaNativeAdvanced({visible:true}));assert.equal(await voicePage.locator('#drawer').isVisible(),true);
  assert.equal(await voicePage.locator('#drawer').evaluate(el=>el.scrollHeight<=el.clientHeight),true,'native controls use the outer page scroll, not a nested drawer');
+ await voicePage.getByText('Model choices and usage',{exact:true}).click();
+ await voicePage.getByRole('link',{name:'Astra specifications',exact:true}).click();
+ assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='modelDocs').at(-1)?.model),'codex/gpt-6-astra','native source links use the bounded documentation action');
+ await voicePage.getByText('Model choices and usage',{exact:true}).click();
  await voicePage.evaluate(()=>baristaNativeAdvanced({visible:false}));assert.equal(await voicePage.locator('#drawer').isVisible(),false);
  await voicePage.route('**/api/companion/send',async route=>{
   const response=await route.fetch();
@@ -190,6 +218,7 @@ try{
  assert.equal(JSON.stringify(projection).includes('private-secret'),false,'hub excludes conversation text and credentials');
  assert.equal(projection.hub.clients[0].host.bundleId,'example.app');
  assert.equal(await voicePage.locator('#answer').isVisible(),false,'cursor replies keep secondary answers closed');
+ assert.equal(await voicePage.locator('#modelRun').textContent(),'Last turn: Local · no model used','a local turn never shows stale model metadata');
  await voicePage.evaluate(()=>render({version:{instance:'fixture',revision:3},sessions:[{id:active,name:'stale',status:'thinking',messages:[]}]}));
  assert.equal(await voicePage.evaluate(()=>current().status),'done','old POST cannot replace newer SSE');
  await voicePage.evaluate(()=>render({version:{instance:'fixture',revision:5},sessions:[{id:active,name:'Question',status:'done',route:'local',presentation:'prompt',messages:[{role:'assistant',text:'Which Save button?'}],approval:{id:'approval-1',reason:'Confirm',action:'click',app:'Fixture',index:2}}]}));

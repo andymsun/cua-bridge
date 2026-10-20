@@ -98,7 +98,22 @@ The adapter expects the Claude-compatible print/stream-json CLI protocol. Set th
 
 Use an absolute executable path if a GUI launch cannot find it. Arguments go directly to the executable, without shell expansion. This is a replaceable CLI adapter, not a built-in local model server.
 
-The default model is `codex/gpt-6-astra`. The other supported choice is `codex/gpt-5.6-sol`. The selected CLI must support that model and the print/stream-json protocol. Fallback is disabled. CUA keeps the requested and reported model names separate. An unexpected reported model stops the turn. A local cursor request uses no model.
+Open **··· → Model for next turn** to choose `codex/gpt-6-astra`, `codex/gpt-5.6-sol`, or the configured default. The choice belongs to that conversation and survives app restarts. It does not change an active turn, another conversation, or your backend settings. Conversation names, such as Barista or Espresso, do not select a model.
+
+Astra is the default here. OpenAI describes Astra as its highest-capability model for demanding work and Sol as a model for complex professional work. Both publish a 1,050,000-token context limit. Barista still sends its bounded history, not a whole desktop or an unlimited conversation.
+
+As checked on 20 October 2026, their published Standard API rates per million tokens are:
+
+| Model | Input | Output |
+| --- | ---: | ---: |
+| GPT-6 Astra | $10 | $50 |
+| GPT-5.6 Sol | $4 | $20 |
+
+These are API rates, not Codex subscription charges. Cache, long-context, and service-tier rates differ. Your signed-in backend controls access, usage, and charges. The selector does not enable Fast mode or change reasoning effort. A lower published price does not prove lower latency: Astra was faster in this Mac's three-goal check, but that is not a general speed or quality ranking.
+
+Sources: [Astra specifications](https://developers.openai.com/api/docs/models/gpt-6-astra), [Sol specifications](https://developers.openai.com/api/docs/models/gpt-5.6-sol). The drawer links open in your browser, outside the authenticated companion page.
+
+The selected CLI must support the chosen model and the print/stream-json protocol. Fallback is disabled. The drawer separates the next-turn choice from the last turn's requested and reported model. An unexpected reported model stops the turn. An unsupported saved choice stays visible until you choose a supported model. A local cursor request reports **Local · no model used**.
 
 ## Notch hub and connected agents
 

@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { companionBackend, config, paths } from "./config.mjs";
+import { COMPANION_MODELS, companionBackend, config, paths } from "./config.mjs";
 import { cleanTarget } from "./pointer.mjs";
 import { parseSpatial, spatialContext, runningTarget, matchedTarget } from "./spatial.mjs";
 
@@ -34,7 +34,7 @@ export class Companion extends EventEmitter {
       const saved = JSON.parse(fs.readFileSync(this.historyPath, "utf8"));
       for (const row of saved.slice(-8)) {
         if (typeof row.id !== "string" || !Array.isArray(row.messages)) continue;
-        this.sessions.set(row.id, { id: row.id, name: text(row.name, 40), mode: "guide", status: "idle", messages: row.messages.slice(-60).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: text(m.text) })), apps: new Map(), key: null, cursor: null });
+        this.sessions.set(row.id, { id: row.id, name: text(row.name, 40), mode: "guide", status: "idle", messages: row.messages.slice(-60).map(m => ({ role: m.role === "user" ? "user" : "assistant", text: text(m.text) })), apps: new Map(), key: null, cursor: null, model: row.model == null ? null : typeof row.model === "string" && row.model.length ? row.model.slice(0, 128) : "Invalid saved model" });
       }
     } catch (e) { if (e.code !== "ENOENT") { this.historyReadFailed = true; this.historyError = "Saved history could not be read. It will not be overwritten. Move companion-history.json aside to enable history after a restart."; } }
   }
@@ -42,21 +42,23 @@ export class Companion extends EventEmitter {
   create({ name = "Andy · Barista", mode = "guide" } = {}) {
     if (!["guide", "act"].includes(mode)) throw new Error("Choose Guide or Act mode");
     if (this.sessions.size >= 8) throw new Error("Eight conversations are open. Remove one before starting another.");
-    const s = { id: randomUUID(), key: randomUUID(), name: text(name, 40) || "Andy · Barista", mode, status: "idle", messages: [], apps: new Map() };
+    const s = { id: randomUUID(), key: randomUUID(), name: text(name, 40) || "Andy · Barista", mode, model: null, status: "idle", messages: [], apps: new Map() };
     s.cursor = this.pointers.session({ name: s.name });
     this.sessions.set(s.id, s); this.changed(); return s;
   }
 
   snapshot() {
     const cursors = this.pointers.snapshot().cursors;
-    return { backend: config().companion.command, demoActive: !!this.demoActive, error: this.historyError ?? null,
-      sessions: [...this.sessions.values()].map(s => ({ id: s.id, name: s.name, mode: s.mode, status: s.status, route: s.route ?? null, presentation: s.presentation ?? "text", requestedModel: s.requestedModel ?? null, reportedModel: s.reportedModel ?? null, timings: s.timings ?? {}, lastTool: s.lastTool ?? null, messages: s.messages, error: s.error ?? null, area: s.area ?? null, hasMarks: !!cursors[s.cursor]?.target, approval: s.approval?.public ?? null })) };
+    let defaultModel = null, modelError = null;
+    try { defaultModel = companionBackend().model; } catch (error) { modelError = text(error.message, 500); }
+    return { backend: config().companion.command, models: COMPANION_MODELS, defaultModel, modelError, demoActive: !!this.demoActive, error: this.historyError ?? null,
+      sessions: [...this.sessions.values()].map(s => ({ id: s.id, name: s.name, mode: s.mode, model: s.model ?? null, status: s.status, route: s.route ?? null, presentation: s.presentation ?? "text", requestedModel: s.requestedModel ?? null, reportedModel: s.reportedModel ?? null, timings: s.timings ?? {}, lastTool: s.lastTool ?? null, messages: s.messages, error: s.error ?? null, area: s.area ?? null, hasMarks: !!cursors[s.cursor]?.target, approval: s.approval?.public ?? null })) };
   }
 
   changed() { this.emit("change", this.snapshot()); }
   save() {
     if (this.historyReadFailed) return;
-    const rows = [...this.sessions.values()].map(({ id, name, messages }) => ({ id, name, messages: messages.slice(-60) }));
+    const rows = [...this.sessions.values()].map(({ id, name, model, messages }) => ({ id, name, ...(model == null ? {} : { model }), messages: messages.slice(-60) }));
     const tmp = this.historyPath + ".tmp";
     try { fs.writeFileSync(tmp, JSON.stringify(rows), { mode: 0o600 }); fs.renameSync(tmp, this.historyPath); this.historyError = null; }
     catch (e) { this.historyError = `Conversation could not be saved: ${e.message}. Check available disk space and permissions.`; }
@@ -66,6 +68,12 @@ export class Companion extends EventEmitter {
     const s = this.get(id);
     if (!key || s.key !== key || s.status === "stopped") throw new Error("Companion session stopped or expired");
     return s;
+  }
+
+  setModel(id, model) {
+    const s = this.get(id);
+    if (model !== null && !COMPANION_MODELS.includes(model)) throw new Error("Choose an approved companion model or the configured default");
+    s.model = model; this.save(); this.changed(); return this.snapshot();
   }
 
   warm() { this.pointers.warm(); return this.snapshot(); }
@@ -198,7 +206,7 @@ export class Companion extends EventEmitter {
     let query = parseSpatial(prompt), selected;
     try { selected = spatialContext(context ?? {}); }
     catch (error) { if (!query) throw error; query = { kind: query.kind, message: error.message }; }
-    const backend = query ? null : companionBackend();
+    const backend = query ? null : companionBackend(s.model ?? undefined);
     if (!s.cursor) s.cursor = this.pointers.session({ name: s.name });
     this.pointers.hide(s.cursor);
     s.startedMono = startedMono; s.timings = { parseMs: elapsed(s) };

@@ -106,6 +106,90 @@ test("model selection and fallback conflicts are rejected before spawning or con
   }
 });
 
+test("conversation model selection reaches the backend without changing the configured default", async () => {
+  const f = setup({ args: [fixture, "--model", "codex/gpt-6-astra"] });
+  try {
+    const other = f.companion.create(), configBefore = fs.readFileSync(process.env.CUA_CONFIG, "utf8");
+    f.companion.setModel(f.session.id, "codex/gpt-5.6-sol");
+    assert.equal(f.state().model, "codex/gpt-5.6-sol");
+    assert.equal(f.companion.snapshot().sessions.find(s => s.id === other.id).model, null);
+    f.companion.send(f.session.id, { prompt: "selected conversation model" });
+    await until(() => ["done", "error"].includes(f.session.status));
+    assert.equal(f.session.status, "done");
+    assert.equal(f.state().requestedModel, "codex/gpt-5.6-sol");
+    assert.equal(f.state().reportedModel, "codex/gpt-5.6-sol");
+    const launch = JSON.parse(fs.readFileSync(record, "utf8"));
+    assert.equal(launch.args[launch.args.indexOf("--model") + 1], "codex/gpt-5.6-sol");
+    assert.equal(launch.args.filter(arg => arg === "--model").length, 1);
+    assert.equal(fs.readFileSync(process.env.CUA_CONFIG, "utf8"), configBefore);
+    f.companion.setModel(f.session.id, null);
+    assert.equal(f.state().model, null);
+    assert.equal(f.companion.snapshot().defaultModel, "codex/gpt-6-astra");
+    assert.equal(f.state().requestedModel, "codex/gpt-5.6-sol", "next-turn selection does not rewrite the last turn");
+  } finally { f.close(); }
+});
+
+test("changing the next model cannot redirect a reserved or active turn", async () => {
+  const f = setup();
+  try {
+    f.companion.setModel(f.session.id, "codex/gpt-5.6-sol");
+    f.companion.send(f.session.id, { prompt: "hold this turn" });
+    f.companion.setModel(f.session.id, "codex/gpt-6-astra");
+    await until(() => f.state().reportedModel !== null);
+    assert.equal(f.state().model, "codex/gpt-6-astra");
+    assert.equal(f.state().requestedModel, "codex/gpt-5.6-sol");
+    assert.equal(f.state().reportedModel, "codex/gpt-5.6-sol");
+    assert.equal(f.session.status, "thinking");
+    fs.writeFileSync(release, "finish");
+    await until(() => f.session.status === "done");
+    f.companion.send(f.session.id, { prompt: "next turn" });
+    await until(() => ["done", "error"].includes(f.session.status));
+    assert.equal(f.session.status, "done");
+    assert.equal(f.state().requestedModel, "codex/gpt-6-astra");
+    assert.equal(f.state().reportedModel, "codex/gpt-6-astra");
+  } finally { f.close(); }
+});
+
+test("invalid model updates leave the choice and history untouched", () => {
+  const f = setup();
+  try {
+    f.companion.setModel(f.session.id, "codex/gpt-5.6-sol");
+    const before = fs.readFileSync(f.companion.historyPath, "utf8");
+    for (const model of [undefined, "", "auto", "gpt-6-astra", "claude-unapproved", {}, 1]) {
+      assert.throws(() => f.companion.setModel(f.session.id, model), /model/i);
+      assert.equal(f.state().model, "codex/gpt-5.6-sol");
+      assert.equal(fs.readFileSync(f.companion.historyPath, "utf8"), before);
+    }
+    assert.throws(() => f.companion.setModel("missing", "codex/gpt-6-astra"), /session/i);
+    assert.equal(f.session.messages.length, 0);
+  } finally { f.close(); }
+});
+
+test("saved model choices survive restart and unsupported choices never silently fall back", () => {
+  const f = setup(); let restored;
+  try {
+    f.companion.setModel(f.session.id, "codex/gpt-5.6-sol");
+    f.companion.close();
+    const rows = JSON.parse(fs.readFileSync(f.companion.historyPath, "utf8"));
+    rows.push({ id: "legacy", name: "Legacy", messages: [{ role: "user", text: "Keep this message" }] });
+    rows.push({ id: "unsupported", name: "Unsupported", model: "retired/model", messages: [] });
+    rows.push({ id: "empty-model", name: "Invalid", model: "", messages: [] });
+    fs.writeFileSync(f.companion.historyPath, JSON.stringify(rows));
+    const before = fs.readFileSync(f.companion.historyPath, "utf8");
+    restored = new Companion({ pointers: f.companion.pointers, native: {} });
+    const sessions = restored.snapshot().sessions;
+    assert.equal(sessions.find(s => s.id === f.session.id).model, "codex/gpt-5.6-sol");
+    assert.equal(sessions.find(s => s.id === "legacy").model, null);
+    assert.equal(sessions.find(s => s.id === "unsupported").model, "retired/model");
+    assert.equal(sessions.find(s => s.id === "empty-model").model, "Invalid saved model", "an empty saved ID is not displayed as the default");
+    assert.equal(fs.readFileSync(restored.historyPath, "utf8"), before, "loading history does not rewrite it");
+    assert.throws(() => restored.send("unsupported", { prompt: "hello" }), /model/i);
+    assert.equal(restored.get("unsupported").messages.length, 0);
+    restored.setModel("unsupported", "codex/gpt-6-astra");
+    assert.deepEqual(restored.get("legacy").messages, [{ role: "user", text: "Keep this message" }]);
+  } finally { if (restored) restored.close(); else f.companion.close(); f.companion.pointers.shutdown(); }
+});
+
 test("model-produced spatial output remains cursor-first after streaming and completion", async () => {
   const f = setup();
   f.companion.pointers.launch = () => {};

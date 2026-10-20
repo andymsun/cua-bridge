@@ -42,6 +42,7 @@ after(() => { mock.restoreAll(); syncBuiltinESMExports(); fs.rmSync(dir, { recur
 test("exact spatial request reserves its synchronous turn and publishes only a normalized cursor", async () => {
   const f = setup();
   try {
+    f.companion.setModel(f.session.id, "codex/gpt-5.6-sol");
     const start = f.companion.send(f.session.id, { prompt: "point at the Save button", context });
     assert.equal(typeof start.then, "undefined", "send keeps the synchronous snapshot contract");
     assert.equal(start.sessions[0].status, "thinking");

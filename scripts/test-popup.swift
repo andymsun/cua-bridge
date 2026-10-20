@@ -45,6 +45,11 @@ import AppKit
         precondition(CompanionContext.windowID(pid: 42, windows: windows) == 71)
         precondition(CompanionContext.windowID(pid: 42, windows: windows, preferred: 72) == 72, "explicit area-selected window is preserved")
         precondition(CompanionContext.windowID(pid: 42, windows: windows, preferred: 73) == nil, "an unavailable selected window is not silently replaced")
+        precondition(CompanionDelegate.modelDocumentation("codex/gpt-6-astra")?.absoluteString == "https://developers.openai.com/api/docs/models/gpt-6-astra")
+        precondition(CompanionDelegate.modelDocumentation("codex/gpt-5.6-sol")?.absoluteString == "https://developers.openai.com/api/docs/models/gpt-5.6-sol")
+        for value: Any in ["https://untrusted.example", "codex/../secrets", "gpt-6-astra", NSNull(), 1] {
+            precondition(CompanionDelegate.modelDocumentation(value) == nil, "documentation actions cannot open an arbitrary URL")
+        }
         var lookups: [pid_t] = []
         let client: [String: Any] = ["capabilities": ["openHost": true], "host": ["ancestors": [4, 42, 99], "bundleId": "example.fixture"]]
         let pid = CompanionContext.hostPID(client) { pid in lookups.append(pid); return pid == 42 ? "example.fixture" : "other.app" }
