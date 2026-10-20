@@ -44,6 +44,8 @@ Exact-label requests use local Accessibility lookup instead of a model. For exam
 
 The label must match exactly, including case. The app must already be open. Lookup checks the current process, window, control geometry, and visible target. It sends no input. A missing, ambiguous, covered, secure, or disabled target produces a short prompt instead of guessed coordinates. Other requests use the configured model.
 
+When another window blocks lookup, the error names its app where available. Some system panels report full-screen bounds. CUA does not assume those windows are transparent. Dismiss the panel, or use **··· → Select** to mark an area yourself.
+
 Opening the popup prepares the cursor overlay. The first submitted local request can start the selected CuaAgent helper. Passive status and provider discovery do not start it. CUA does not request app access automatically.
 
 A three-goal check on this Mac published cursor data in 28.2, 43.1, and 54.3 ms with a warm helper. The first cold-helper request took 516.2 ms. The same goals through the earlier model route took 10,966.8 to 14,874.2 ms. These are local feed measurements, not visible cursor-arrival times or a general performance guarantee.

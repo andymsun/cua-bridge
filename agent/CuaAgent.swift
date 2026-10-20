@@ -452,8 +452,17 @@ func lookupPositiveRect(_ rect: CGRect) -> Bool {
         && rect.size.width > 0 && rect.size.height > 0
 }
 
+func lookupOcclusionMessage(_ owner: String?) -> String {
+    let scalars = (owner ?? "").unicodeScalars.prefix(80).filter {
+        !CharacterSet.controlCharacters.contains($0) && $0.properties.generalCategory != .format
+    }
+    let name = String(String.UnicodeScalarView(scalars)).trimmingCharacters(in: .whitespacesAndNewlines)
+    let subject = name.isEmpty ? "Another window" : "A window from \(name.debugDescription)"
+    return "\(subject) overlaps this target. Dismiss that panel or select a visible area."
+}
+
 func lookupMatch(_ candidate: LookupCandidate, query: LookupQuery, windowID: CGWindowID, window: CGRect,
-                 clips: [CGRect], displays: [CGRect], occluders: [CGRect]) throws -> LookupMatch? {
+                 clips: [CGRect], displays: [CGRect], occluders: [CGRect], occluderNames: [String] = []) throws -> LookupMatch? {
     guard !candidate.secure, !candidate.hidden, candidate.enabled != false else { return nil }
     guard query.role == nil || query.role == candidate.role else { return nil }
     guard candidate.name.utf16.count <= 512 else {
@@ -471,8 +480,8 @@ func lookupMatch(_ candidate: LookupCandidate, query: LookupQuery, windowID: CGW
           displays.contains(where: { lookupPositiveRect($0) && $0.contains(frame) }) else { return nil }
     // Window bounds are deliberately conservative, including transparent/irregular windows.
     // AX hit tests below supplement this check; neither is a pixel-visibility guarantee.
-    guard !occluders.contains(where: { $0.intersects(frame) }) else {
-        throw LookupFailure("incomplete", "A higher window overlaps the exact target; visibility cannot be verified passively.")
+    if let index = occluders.firstIndex(where: { $0.intersects(frame) }) {
+        throw LookupFailure("incomplete", lookupOcclusionMessage(occluderNames.indices.contains(index) ? occluderNames[index] : nil))
     }
     return LookupMatch(name: candidate.name, role: candidate.role, windowID: windowID,
                        rect: CGRect(x: (frame.minX - window.minX) / window.width, y: (frame.minY - window.minY) / window.height,
@@ -675,7 +684,7 @@ func lookupIsGuideWindow(_ info: [String: Any], overlay: (pid: pid_t, windows: S
     return overlay.windows.contains(id)
 }
 
-func lookupVisibility(_ reader: LookupReader, pid: pid_t, windowID: CGWindowID, frame: CGRect) throws -> (displays: [CGRect], occluders: [CGRect]) {
+func lookupVisibility(_ reader: LookupReader, pid: pid_t, windowID: CGWindowID, frame: CGRect) throws -> (displays: [CGRect], occluders: [CGRect], occluderNames: [String]) {
     try reader.checkTime()
     guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
           windows.count <= 512 else { throw LookupFailure("incomplete", "Visible window metadata is unavailable or exceeds the lookup limit.") }
@@ -692,7 +701,7 @@ func lookupVisibility(_ reader: LookupReader, pid: pid_t, windowID: CGWindowID, 
     }
     guard let alpha = windows[index][kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue > 0,
           try bounds(windows[index]) == frame else { throw LookupFailure("incomplete", "Selected window visibility or geometry changed.") }
-    var occluders: [CGRect] = []
+    var occluders: [CGRect] = [], occluderNames: [String] = []
     let overlay = lookupGuideOverlay()
     for info in windows.prefix(index) {
         // Our guide marks are output, not document occlusion. Other local windows remain blockers.
@@ -700,7 +709,11 @@ func lookupVisibility(_ reader: LookupReader, pid: pid_t, windowID: CGWindowID, 
         guard let alpha = info[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue.isFinite else {
             throw LookupFailure("incomplete", "A higher window's visibility is unavailable.")
         }
-        if alpha.doubleValue > 0 { occluders.append(try bounds(info)) }
+        if alpha.doubleValue > 0 {
+            let owner = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+            let name = info[kCGWindowOwnerName as String] as? String ?? owner.flatMap { $0 > 1 ? NSRunningApplication(processIdentifier: $0)?.localizedName : nil } ?? ""
+            occluders.append(try bounds(info)); occluderNames.append(name)
+        }
     }
     var count: UInt32 = 0
     guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0, count <= 16 else {
@@ -711,7 +724,7 @@ func lookupVisibility(_ reader: LookupReader, pid: pid_t, windowID: CGWindowID, 
         throw LookupFailure("incomplete", "Active displays changed during lookup.")
     }
     try reader.checkTime()
-    return (displays.map { CGDisplayBounds($0) }, occluders)
+    return (displays.map { CGDisplayBounds($0) }, occluders, occluderNames)
 }
 
 func lookup(_ request: [String: Any]) -> [String: Any] {
@@ -769,7 +782,7 @@ func lookup(_ request: [String: Any]) -> [String: Any] {
                 let candidate = LookupCandidate(name: name, role: state.role, pid: query.pid, windowID: id, frame: bounds ?? .zero,
                                                 enabled: state.enabled, secure: state.secure, hidden: state.hidden)
                 if let match = try lookupMatch(candidate, query: query, windowID: id, window: frame, clips: clips,
-                                               displays: visibility.displays, occluders: visibility.occluders) {
+                                               displays: visibility.displays, occluders: visibility.occluders, occluderNames: visibility.occluderNames) {
                     matches.append(match); elements.append(element)
                 }
             }
@@ -821,7 +834,7 @@ func lookup(_ request: [String: Any]) -> [String: Any] {
             let candidate = LookupCandidate(name: name, role: state.role, pid: query.pid, windowID: id, frame: bounds,
                                             enabled: state.enabled, secure: state.secure, hidden: state.hidden)
             guard let fresh = try lookupMatch(candidate, query: query, windowID: id, window: frame, clips: clips,
-                                               displays: visibility.displays, occluders: visibility.occluders), fresh == matches[index] else {
+                                               displays: visibility.displays, occluders: visibility.occluders, occluderNames: visibility.occluderNames), fresh == matches[index] else {
                 throw LookupFailure("incomplete", "An exact target changed during lookup; retry with fresh context.")
             }
             try reader.hitTest(element, frame: bounds, pid: query.pid)
@@ -834,9 +847,11 @@ func lookup(_ request: [String: Any]) -> [String: Any] {
         for match in matches {
             let rect = CGRect(x: frame.minX + match.rect.minX * frame.width, y: frame.minY + match.rect.minY * frame.height,
                               width: match.rect.width * frame.width, height: match.rect.height * frame.height)
-            guard finalVisibility.displays.contains(where: { $0.contains(rect) }),
-                  !finalVisibility.occluders.contains(where: { $0.intersects(rect) }) else {
+            guard finalVisibility.displays.contains(where: { $0.contains(rect) }) else {
                 throw LookupFailure("incomplete", "Target visibility changed during validation.")
+            }
+            if let index = finalVisibility.occluders.firstIndex(where: { $0.intersects(rect) }) {
+                throw LookupFailure("incomplete", lookupOcclusionMessage(finalVisibility.occluderNames[index]))
             }
         }
         try reader.checkTime()

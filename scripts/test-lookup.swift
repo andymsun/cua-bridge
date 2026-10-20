@@ -144,6 +144,22 @@ checkLookup("any overlapping higher window makes visibility incomplete") {
     try expectLookupFailure("incomplete") { _ = try validateLookup(lookupCandidate(), occluders: [CGRect(x: -895, y: 165, width: 1, height: 1)]) }
     try expectLookup(try validateLookup(lookupCandidate(), occluders: [CGRect(x: -800, y: 160, width: 20, height: 30)]) != nil, "unrelated window must not block")
 }
+checkLookup("occlusion errors identify the blocking app without exposing a usable target") {
+    for owner in ["NotificationCenter", "\n" + String(repeating: "x", count: 1000), "", "\u{202e}App\u{0000}"] {
+        do {
+            _ = try lookupMatch(lookupCandidate(), query: lookupQuery, windowID: 42, window: lookupWindow,
+                                clips: [], displays: lookupDisplays, occluders: [CGRect(x: -895, y: 165, width: 1, height: 1)], occluderNames: [owner])
+            throw AgentError("an overlapping window must still prevent a target")
+        } catch let error as LookupFailure {
+            try expectLookup(error.status == "incomplete", "named blockers remain incomplete")
+            if owner == "NotificationCenter" { try expectLookup(error.message.contains(owner), "the blocker name must reach the person") }
+            try expectLookup(error.message.count <= 240, "blocker names stay bounded")
+            try expectLookup(!error.message.contains("\n") && !error.message.contains("\u{202e}") && !error.message.contains("\u{0000}"), "control characters remain data, not display controls")
+            let result = lookupResult([], incomplete: error.message)
+            try expectLookup(result["target"] == nil, "a named blocker does not authorize coordinates")
+        }
+    }
+}
 let validLookupMatch = try validateLookup(lookupCandidate())!
 checkLookup("complete search distinguishes no match from duplicate matches") {
     try expectLookup(lookupResult([], incomplete: nil)["status"] as? String == "not_found", "complete empty search")

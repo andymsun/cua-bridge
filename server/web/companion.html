@@ -141,7 +141,7 @@ function paint(){
  $('approval').hidden=!approval;if(approval)$('approvalText').textContent=(approval.reason||'Requested action')+'\n'+approval.action+' · '+approval.app+' · element '+approval.index+(approval.text?'\n'+approval.text:'');
  $('answer').textContent=answer;
  const essential=s?.presentation==='prompt';
- $('answer').hidden=!answer||(!essential&&(!showAnswer||s?.presentation==='cursor'||(native&&!advanced)));
+ $('answer').hidden=!answer||answer===s?.error||(!essential&&(!showAnswer||s?.presentation==='cursor'||(native&&!advanced)));
  if(!$('history').hidden)renderHistory();
  $('status').textContent=voiceStatus||(!online?'Reconnecting to local CUA…':state.demoActive?'Local demo · no mouse input sent':approval?'Waiting for your approval':busy?(s.timings?.firstEventMs!=null?'Andy is working…':'Starting Andy…'):'');
  $('status').classList.toggle('busy',!!busy);$('demo').textContent=state.demoActive?'Stop demo':'Pointer demo';

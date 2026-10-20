@@ -233,6 +233,14 @@ try{
  assert.equal(await voicePage.evaluate(()=>current().name),'Restarted','late responses from a retired daemon instance cannot roll state back');
  await voicePage.evaluate(()=>events.onerror());
  assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='hubState').at(-1).connected),false,'disconnect is projected without activation');
+ for(const view of [page,voicePage]){
+  await view.evaluate(()=>{
+   events.close();const message='A window from "Fixture Overlay" overlaps this target. Dismiss that panel or select a visible area.';
+   render({version:{instance:'error-fixture',revision:0},sessions:[{id:active||'error',name:'Error fixture',status:'error',route:'local',presentation:'prompt',error:message,messages:[{role:'assistant',text:message}]}]});
+  });
+  assert.equal(await view.locator('#error').isVisible(),true,'an actionable error stays visible');
+  assert.equal(await view.locator('#answer').isVisible(),false,'the same error is not repeated as a second reply');
+ }
  await voicePage.close();
  assert.deepEqual(errors,[]);
  console.log('PASS compact popup, authenticated routes, areas, safe text, dark layout, Escape, and explicit Stop');
