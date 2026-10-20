@@ -72,7 +72,7 @@ try{
  if(process.argv.includes('--native')){
   const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),exe=path.join(dir,'popup-check');
   const hubSource=process.env.CUA_HUB_TEST_SOURCE||path.join(root,'hud/CompanionHub.swift');
-  await run('swiftc',['-D','COMPANION_TEST','-swift-version','5',...['hud/CuaPreview.swift','hud/Companion.swift','hud/CompanionComposer.swift','hud/PointerGeometry.swift','hud/CompanionVoice.swift','scripts/test-popup.swift'].map(p=>path.join(root,p)),hubSource,'-o',exe]);
+  await run('swiftc',['-D','COMPANION_TEST','-swift-version','5',...['hud/CuaPreview.swift','hud/Companion.swift','hud/CompanionComposer.swift','hud/CompanionDrafts.swift','hud/PointerGeometry.swift','hud/CompanionVoice.swift','scripts/test-popup.swift'].map(p=>path.join(root,p)),hubSource,'-o',exe]);
   await run(exe,[]);
   const editor=path.join(dir,'composer-check');
   await run('swiftc',['-swift-version','5',path.join(root,'hud/CompanionComposer.swift'),path.join(root,'scripts/test-composer.swift'),'-o',editor]);await run(editor,[]);
@@ -84,6 +84,7 @@ try{
  const sent=[];voicePage.on('request',r=>{if(r.url().endsWith('/api/companion/send'))sent.push(r.postDataJSON())});
  await voicePage.addInitScript(()=>{window.nativeMessages=[];window.webkit={messageHandlers:{barista:{postMessage:message=>window.nativeMessages.push(message)}}}});
  await voicePage.goto(origin+'/companion?t=test-token');await voicePage.waitForFunction(()=>online);
+ await voicePage.evaluate(()=>baristaRestoreDrafts({epoch:1,drafts:{}}));
  await voicePage.evaluate(()=>baristaOpened());assert.equal(warmCalls,1,'opening the native composer prepares its pointer overlay without inference');
  assert.equal(await voicePage.evaluate(()=>['baristaNativeDraft','baristaNativeSubmit','baristaNativeSession','baristaNativeStop','baristaNativeClear','baristaNativeAdvanced','baristaNativeVoicePrepare'].every(key=>typeof window[key]==='function')),true,'native controls have dedicated callbacks');
  const ids=await voicePage.evaluate(async()=>{await makeSession(true);const a=active;await makeSession(true);return [a,active]});
@@ -92,7 +93,7 @@ try{
  assert.equal(await voicePage.evaluate(()=>voiceReply),null);
  const [a,b]=ids;
  await voicePage.evaluate(({a})=>baristaNativeSession({id:a}),{a});
- await voicePage.evaluate(({a})=>baristaNativeDraft({id:a,text:'Keep draft',edit:1}),{a});
+ await voicePage.evaluate(({a})=>baristaNativeDraft({epoch:nativeDraftEpoch,id:a,text:'Keep draft',edit:1}),{a});
  await voicePage.evaluate(async()=>{nativeMessages=[];await startTalk();$('talk').dispatchEvent(new PointerEvent('pointercancel'))});
  await voicePage.waitForFunction(()=>nativeMessages.filter(m=>m.action.startsWith('voice')).length===2);
  assert.deepEqual(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action.startsWith('voice')).map(m=>m.action)),['voiceStart','voiceCancel'],'a cancelled gesture never sends a phrase');
@@ -119,7 +120,7 @@ try{
   baristaVoiceState({captureID:'old-capture',phase:'permission'});
   baristaVoiceText({captureID:'old-capture',text:'partial phrase'});
   await baristaNativeSession({id:b});
-  baristaNativeDraft({id:b,text:'Other draft',edit:2});
+  baristaNativeDraft({epoch:nativeDraftEpoch,id:b,text:'Other draft',edit:2});
   await baristaVoiceFinal({captureID:'old-capture',text:'Never redirect this'});
  },{a,b});
  assert.equal(companion.get(a).messages.length,0);assert.equal(companion.get(b).messages.length,0,'a changed destination cancels the captured phrase');
@@ -135,7 +136,7 @@ try{
  assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='composerState').at(-1).edit),1,'dictation never acknowledges a native edit it has not received');
  await voicePage.evaluate(async({a})=>{
   await baristaNativeVoicePrepare({id:a,captureID:'edit-cancel',route:'dictation'});
-  baristaNativeDraft({id:a,text:'New typed draft',edit:3});
+  baristaNativeDraft({epoch:nativeDraftEpoch,id:a,text:'New typed draft',edit:3});
   await baristaVoiceFinal({captureID:'edit-cancel',text:'must not overwrite typing'});
  },{a});
  assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','new typing invalidates capture generation');
@@ -161,13 +162,13 @@ try{
  await voicePage.evaluate(()=>baristaNativeStop({id:active}));
  const text='Quotes " and \\ and newline\n<script>window.injected=true</script> 終';
  await voicePage.evaluate(async({b,text})=>{
-  await baristaNativeSession({id:b});baristaNativeDraft({id:b,text,edit:4});
-  await baristaNativeSubmit({id:b,text,edit:4});
+  await baristaNativeSession({id:b});baristaNativeDraft({epoch:nativeDraftEpoch,id:b,text,edit:4});
+  await baristaNativeSubmit({epoch:nativeDraftEpoch,id:b,text,edit:4});
  },{b,text});
  await voicePage.waitForFunction(()=>current()?.status==='done');
  assert.equal(companion.get(b).messages[0].text,text,'native text remains data');
  assert.equal(await voicePage.evaluate(()=>window.injected),undefined);
- await voicePage.evaluate(async({a,b})=>{await baristaNativeSession({id:a});baristaNativeDraft({id:b,text:'stale echo',edit:5})},{a,b});
+ await voicePage.evaluate(async({a,b})=>{await baristaNativeSession({id:a});baristaNativeDraft({epoch:nativeDraftEpoch,id:b,text:'stale echo',edit:5})},{a,b});
  assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','late different-session callbacks cannot overwrite draft');
  companion.annotate(a,{kind:'circle',rect:{x:100,y:100,w:120,h:60}});
  companion.annotate(b,{kind:'highlight',rect:{x:300,y:100,w:120,h:60}});
@@ -188,10 +189,10 @@ try{
  await voicePage.evaluate(()=>baristaNativeAdvanced({visible:false}));assert.equal(await voicePage.locator('#drawer').isVisible(),false);
  await voicePage.route('**/api/companion/send',async route=>{
   const response=await route.fetch();
-  await voicePage.evaluate(async({a,b})=>{baristaNativeDraft({id:b,text:'Typed while sending',edit:11});await baristaNativeSession({id:a})},{a,b});
+  await voicePage.evaluate(async({a,b})=>{baristaNativeDraft({epoch:nativeDraftEpoch,id:b,text:'Typed while sending',edit:11});await baristaNativeSession({id:a})},{a,b});
   await route.fulfill({response});
  });
- await voicePage.evaluate(async({b})=>{await baristaNativeSession({id:b});baristaNativeDraft({id:b,text:'Second typed question',edit:10});await baristaNativeSubmit({id:b,text:'Second typed question',edit:10})},{b});
+ await voicePage.evaluate(async({b})=>{await baristaNativeSession({id:b});baristaNativeDraft({epoch:nativeDraftEpoch,id:b,text:'Second typed question',edit:10});await baristaNativeSubmit({epoch:nativeDraftEpoch,id:b,text:'Second typed question',edit:10})},{b});
  assert.equal(await voicePage.evaluate(({b})=>drafts.get(b).text,{b}),'Typed while sending','a delayed POST does not erase newer typing');
  assert.equal(await voicePage.evaluate(()=>active),a,'a delayed POST does not change selection');
  await voicePage.unroute('**/api/companion/send');

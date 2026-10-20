@@ -94,6 +94,10 @@ import AppKit
         precondition(!composer.resume.isEnabled, "Continue needs a connected transport")
         composer.apply(paused.merging(["status": "stopped"]) { _, new in new })
         precondition(composer.status.stringValue.contains("Stopped") && !composer.resume.isHidden, "Stop cancels work but leaves deliberate continuation available")
+        composer.beginRestore()
+        precondition(!editor.isEditable && !composer.send.isEnabled && !composer.dictate.isEnabled && !composer.sessions.isEnabled, "a new web page cannot accept input before its draft restore")
+        composer.apply(state("Recovered after reload", edit: 0, id: "b"))
+        precondition(editor.string == "Recovered after reload" && editor.isEditable && composer.sessions.isEnabled, "a restored page starts a new transport edit sequence")
         precondition(composer.window == nil, "checks never order a window or send global input")
         print("PASS native editor Enter/Shift-Enter/Escape, real IME, draft callbacks, and stale-ack protection")
     }

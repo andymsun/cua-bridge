@@ -182,7 +182,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = cafeColor(0xfcf9f2, 0x26221d).cgColor }
     }
 
-    private var draftPayload: [String: Any] { ["id": activeSessionID as Any? ?? NSNull(), "text": editor.string, "edit": edit] }
+    var draftPayload: [String: Any] { ["id": activeSessionID as Any? ?? NSNull(), "text": editor.string, "edit": edit] }
     func textDidChange(_ notification: Notification) {
         guard !applying else { return }
         nextEdit = max(nextEdit, edit) + 1; edit = nextEdit; onDraft?(draftPayload)
@@ -205,6 +205,12 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     func selectSession(id: String?) {
         pendingSession = id; pendingNew = id == nil; editor.isEditable = false
         onSession?(["id": id as Any? ?? NSNull()])
+    }
+    func beginRestore() {
+        editor.isEditable = false; send.isEnabled = false; dictate.isEnabled = false; sessions.isEnabled = false
+        clearMarks.isEnabled = false; resume.isEnabled = false
+        edit = 0; pendingSession = nil; pendingNew = false; deferredState = nil
+        status.stringValue = "Restoring drafts…"
     }
     func transportError(_ message: String) {
         pendingSession = nil; pendingNew = false
@@ -257,7 +263,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         if let selected = sessions.itemArray.first(where: { $0.representedObject as? String == id }) { sessions.select(selected) }
         let connected = payload["connected"] as? Bool == true
         let busy = payload["status"] as? String == "thinking" || payload["sending"] as? Bool == true
-        editor.isEditable = true; send.isEnabled = connected && !busy
+        editor.isEditable = id != nil; sessions.isEnabled = connected; send.isEnabled = connected && !busy && id != nil
         send.isHidden = busy; stop.isHidden = !busy; stop.isEnabled = connected
         guideID = (payload["guideID"] as? String).flatMap { !$0.isEmpty && $0.utf16.count <= 128 ? $0 : nil }
         resume.isHidden = guideID == nil || busy; resume.isEnabled = connected && !busy && guideID != nil

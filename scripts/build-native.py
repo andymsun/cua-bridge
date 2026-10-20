@@ -39,7 +39,7 @@ def build(destination, identity, names, isolated=False, runtime_dir=None):
         binary.parent.mkdir(parents=True)
         sources = [REPO / source]
         if source == 'hud/CuaPreview.swift':
-            sources += [REPO / 'hud/PointerGeometry.swift', REPO / 'hud/Companion.swift', REPO / 'hud/CompanionComposer.swift', REPO / 'hud/CompanionHub.swift', REPO / 'hud/CompanionVoice.swift']
+            sources += [REPO / 'hud/PointerGeometry.swift', REPO / 'hud/Companion.swift', REPO / 'hud/CompanionComposer.swift', REPO / 'hud/CompanionDrafts.swift', REPO / 'hud/CompanionHub.swift', REPO / 'hud/CompanionVoice.swift']
         run('swiftc', '-O', '-swift-version', '5', '-target', f'{platform.machine()}-apple-macos14.0', '-o', binary, *sources)
         info = dict(CFBundleName=name, CFBundleIdentifier=identifier, CFBundleExecutable=name,
                     CFBundlePackageType='APPL', CFBundleShortVersionString='2.3.0',

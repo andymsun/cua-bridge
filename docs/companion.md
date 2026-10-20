@@ -20,9 +20,19 @@ The app starts the local daemon if necessary. It does not restart an existing da
 - **Escape:** dismiss the popup and keep the draft. This does not stop an agent turn. During a gesture, Escape cancels the gesture first.
 - **Control+Option+Escape:** stop companion turns and speech.
 - The native popup measures 360 × 128 points when idle. It stays at its anchor while you type. Outside clicks transfer focus but do not hide it. Reply updates do not take focus back. History and settings are behind **···**.
-- Enter sends. Shift-Enter inserts a line. During IME composition, Enter and Escape stay with the text editor. Each conversation keeps its own draft while the app stays open.
+- Enter sends. Shift-Enter inserts a line. During IME composition, Enter and Escape stay with the text editor. Each native conversation keeps its own draft across app restarts. Browser drafts stay in the current page.
 - Quit stops companion turns and closes the app. It does not stop unrelated CUA sessions.
 - Choose **New** in **···** for another conversation and cursor. Up to eight conversations can coexist.
+
+## Native draft recovery
+
+The native app restores drafts before it enables the editor. It keeps one draft per conversation in `companion-drafts.json` in the selected runtime directory. The file uses mode `0600`; it is not encrypted at rest. The cache holds at most sixteen records of 8,000 UTF-16 units each. It never silently evicts unsent text.
+
+A background queue saves accepted edits with atomic file replacement. Quit waits for queued writes. A crash can recover the last completed write, not an edit still in transit. Recovery never sends a question automatically. If the server accepted a question just before a crash, its text can reappear as a draft. Check history before you send it again.
+
+A late Send acknowledgment cannot erase newer text. Page reloads use a new restore epoch. A failed save stays visible even if another conversation saves successfully. Copy unsent text before you close the app after a save error. Unreadable or externally changed files stay untouched.
+
+Confirmed **Remove** in the native popup deletes that conversation's cached draft. A draft can remain in the private file if its conversation disappears through another interface. The app does not delete recovered text solely because a session list omits it. Browser drafts remain page-local.
 
 ## Guide, point, and act
 
@@ -211,6 +221,9 @@ node scripts/test-spatial.mjs
 node scripts/test-companion-local.mjs
 node scripts/test-companion-model.mjs
 node scripts/test-companion-guide.mjs
+node scripts/test-companion-draft-ui.mjs
+swiftc -parse-as-library -swift-version 5 hud/CompanionDrafts.swift scripts/test-companion-drafts.swift -o build/drafts-check
+build/drafts-check build
 node scripts/test-native-lookup.mjs
 node scripts/test-agent-hub.mjs
 node scripts/test-hub-protocol.mjs
@@ -220,7 +233,7 @@ swiftc -swift-version 5 hud/CompanionComposer.swift scripts/test-composer.swift 
 build/composer-check
 swiftc -swift-version 5 hud/CompanionHub.swift scripts/test-companion-hub.swift -o build/hub-check
 build/hub-check
-swiftc -D COMPANION_TEST -swift-version 5 hud/CuaPreview.swift hud/PointerGeometry.swift hud/Companion.swift hud/CompanionComposer.swift hud/CompanionHub.swift hud/CompanionVoice.swift scripts/test-pointer-motion.swift -o build/motion-check
+swiftc -D COMPANION_TEST -swift-version 5 hud/CuaPreview.swift hud/PointerGeometry.swift hud/Companion.swift hud/CompanionComposer.swift hud/CompanionDrafts.swift hud/CompanionHub.swift hud/CompanionVoice.swift scripts/test-pointer-motion.swift -o build/motion-check
 # Use an unused private CUA_RUN_DIR and CUA_CONFIG for this visible overlay check.
 CUA_RUN_DIR="/absolute/path/to/private/check-runtime" CUA_CONFIG="/absolute/path/to/private/check-runtime/config.json" build/motion-check
 ```

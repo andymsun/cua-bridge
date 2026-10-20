@@ -21,6 +21,7 @@ a{color:var(--accent);text-underline-offset:2px}a:focus-visible{outline:2px soli
 const token='{{TOKEN}}',$=id=>document.getElementById(id),native=!!window.webkit?.messageHandlers?.barista;
 let state={sessions:[]},active=null,mode='guide',online=false,spotlight=false,showAnswer=false,removeArmed=null,appContext=null,voiceReply=null,spoken='',lastSize=0;
 let uiError='',advanced=false,composing=false,creating=null,voiceCapture=null,voicePhase='idle',voiceStatus='',talking=false,lastHub='';
+let nativeDraftEpoch=0,nativeDraftReady=!native,nativeRestore=null,draftStorageError='';
 const drafts=new Map(),sending=new Set(),changingModels=new Set(),usedCaptures=new Set(),retiredInstances=new Set(),current=()=>state.sessions.find(s=>s.id===active);
 const draft=(id=active)=>{if(!drafts.has(id))drafts.set(id,{text:'',generation:0,edit:0});return drafts.get(id)};
 const bounded=(value,max)=>typeof value==='string'?value.slice(0,max):'';
@@ -28,7 +29,7 @@ const latestAnswer=()=>[...(current()?.messages||[])].reverse().find(m=>m.role==
 document.body.dataset.native=String(native);
 if(native)for(const link of document.querySelectorAll('[data-model-doc]'))link.onclick=e=>{e.preventDefault();bridge({action:'modelDocs',model:link.dataset.modelDoc})};
 function renderHistory(){$('history').textContent=(current()?.messages||[]).map(m=>(m.role==='user'?'You':'Andy')+': '+m.text).join('\n\n')}
-function bridge(message){if(!native)throw new Error('Open the native Andy app for desktop gestures, the pointer demo, and voice. Coordinate tools remain available here.');window.webkit.messageHandlers.barista.postMessage(message)}
+function bridge(message){if(!native)throw new Error('Open the native Andy app for desktop gestures, the pointer demo, and voice. Coordinate tools remain available here.');window.webkit.messageHandlers.barista.postMessage({...message,epoch:nativeDraftEpoch})}
 function expanded(){document.body.dataset.expanded=String(advanced||!!current()?.approval||!$('error').hidden||!$('answer').hidden||!$('guide').hidden)}
 function error(message){uiError=bounded(message,4000);$('error').textContent=uiError;$('error').hidden=!uiError;expanded();publishNative()}
 async function api(route,data={}){const r=await fetch('/api/companion'+route,{method:'POST',headers:{'content-type':'application/json','x-cua-token':token},body:JSON.stringify(data)});const result=await r.json();if(!r.ok)throw new Error(result.error||'Request failed. Try again.');return result}
@@ -94,13 +95,36 @@ async function guideAction(id,guideId,end=false){
 window.baristaNativeContinue=payload=>act(()=>guideAction(payload?.id,payload?.guideId));
 $('continueGuide').onclick=()=>{const s=current();return act(()=>guideAction(s?.id,s?.guide?.id))};
 $('endGuide').onclick=()=>{const s=current();return act(()=>guideAction(s?.id,s?.guide?.id,true))};
+function restoreNativeDrafts(){
+ if(!nativeRestore||!online||creating)return;
+ if(!state.sessions.length){const pending=nativeRestore;makeSession(false).then(()=>{if(nativeRestore===pending)restoreNativeDrafts()}).catch(e=>error(e.message));return}
+ const saved=nativeRestore;nativeRestore=null;cancelCapture();drafts.clear();
+ for(const [id,row] of Object.entries(saved.drafts))if(state.sessions.some(s=>s.id===id))drafts.set(id,{text:row.text,generation:0,edit:row.edit});
+ nativeDraftReady=true;bridge({action:'draftsRestored'});
+ chooseSession(state.sessions.some(s=>s.id===saved.activeSessionID)?saved.activeSessionID:current()?.id||state.sessions.at(-1).id);
+}
+window.baristaRestoreDrafts=payload=>{
+ if(!native||!payload||!Number.isSafeInteger(payload.epoch)||payload.epoch<1||!payload.drafts||typeof payload.drafts!=='object'||Array.isArray(payload.drafts))return false;
+ const rows=Object.entries(payload.drafts);
+ if(rows.length>16||rows.some(([id,d])=>!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)||!d||typeof d.text!=='string'||d.text.length>8000||!Number.isSafeInteger(d.edit)||d.edit<0||!Number.isSafeInteger(d.revision)||d.revision<0))return false;
+ if(payload.epoch<nativeDraftEpoch)return false;if(payload.epoch===nativeDraftEpoch)return true;
+ nativeDraftEpoch=payload.epoch;nativeDraftReady=false;nativeRestore=payload;restoreNativeDrafts();return true;
+};
+window.baristaDraftStorage=payload=>{
+ if(!native||payload?.epoch!==nativeDraftEpoch)return false;
+ draftStorageError=bounded(payload.message,4000);paint();return true;
+};
+function publishDraft(id){
+ if(!native||!nativeDraftReady||!state.sessions.some(s=>s.id===id))return;
+ const d=draft(id);bridge({action:'draftChanged',id,text:d.text,edit:d.edit,generation:d.generation});
+}
 function publishNative(){
- if(!native)return;
+ if(!native||!nativeDraftReady)return;
  const s=current(),d=draft(),sessions=sessionMetadata();
  const hub={action:'hubState',connected:online,activeSessionID:active,sessions};
  const metadata=hubMetadata(state.hub);if(metadata)hub.hub=metadata;
  const signature=JSON.stringify(hub);if(signature!==lastHub){lastHub=signature;bridge(hub)}
- bridge({action:'composerState',connected:online,activeSessionID:active,sessions,draft:d.text,generation:d.generation,edit:d.edit,status:s?.status||'idle',sending:sending.has(active),mode,route:s?.route||null,presentation:s?.presentation||null,notice:bounded(s?.error||state.error||uiError||(s?.presentation==='prompt'?latestAnswer():''),4000),needsApproval:!!s?.approval,hasMarks:s?.hasMarks===true,guideID:s?.guide?.id||null,advanced,voicePhase,voiceStatus});
+ bridge({action:'composerState',connected:online,activeSessionID:active,sessions,draft:d.text,generation:d.generation,edit:d.edit,status:s?.status||'idle',sending:sending.has(active),mode,route:s?.route||null,presentation:s?.presentation||null,notice:bounded(s?.error||state.error||draftStorageError||uiError||(s?.presentation==='prompt'?latestAnswer():''),4000),needsApproval:!!s?.approval,hasMarks:s?.hasMarks===true,guideID:s?.guide?.id||null,advanced,voicePhase,voiceStatus});
 }
 function cancelCapture(notify=true){
  const capture=voiceCapture;voiceCapture=null;talking=false;voicePhase='idle';voiceStatus='';document.body.dataset.listening='false';
@@ -108,12 +132,13 @@ function cancelCapture(notify=true){
 }
 function setDraft(text,{id=active,edit=draft(id).edit}={}){
  const d=draft(id);if(text!==d.text){cancelCapture();d.text=text;d.generation++}d.edit=edit;
- if(id===active)$('prompt').value=d.text;publishNative();return true;
+ if(id===active)$('prompt').value=d.text;publishDraft(id);publishNative();return true;
 }
-function acceptNativeDraft(payload){
- if(!payload||payload.id!==active||typeof payload.text!=='string'||payload.text.length>8000||!Number.isSafeInteger(payload.edit)||payload.edit<0)return false;
- const d=draft();if(payload.edit<d.edit||(payload.edit===d.edit&&payload.text!==d.text))return false;
- return setDraft(payload.text,{edit:payload.edit});
+function acceptNativeDraft(payload,allowInactive=false){
+ if(native&&(!nativeDraftReady||payload?.epoch!==nativeDraftEpoch))return false;
+ if(!payload||(!allowInactive&&payload.id!==active)||!state.sessions.some(s=>s.id===payload.id)||typeof payload.text!=='string'||payload.text.length>8000||!Number.isSafeInteger(payload.edit)||payload.edit<0)return false;
+ const d=draft(payload.id);if(payload.edit<d.edit||(payload.edit===d.edit&&payload.text!==d.text))return false;
+ return setDraft(payload.text,{id:payload.id,edit:payload.edit});
 }
 function chooseSession(id){
  if(!state.sessions.some(s=>s.id===id))return false;
@@ -156,7 +181,7 @@ function render(next){
   if(id!==active){cancelCapture();voiceReply=null;if(native)bridge({action:'silence'});active=id;$('prompt').value=draft().text;mode=current()?.mode||'guide';$('mode').value=mode}
  }
  if(voiceCapture&&voiceCapture.id!==null&&!state.sessions.some(s=>s.id===voiceCapture.id))cancelCapture();
- paint();return true;
+ restoreNativeDrafts();paint();return true;
 }
 function paint(){
  const s=current(),busy=s?.status==='thinking'||sending.has(active),approval=s?.approval,answer=latestAnswer();
@@ -173,7 +198,7 @@ function paint(){
  if(!$('history').hidden)renderHistory();
  $('status').textContent=voiceStatus||(!online?'Reconnecting to local CUA…':state.demoActive?'Local demo · no mouse input sent':approval?'Waiting for your approval':busy?(s.timings?.firstEventMs!=null?'Andy is working…':'Starting Andy…'):s?.status==='paused'?'Guide paused · Continue when ready':s?.status==='stopped'?'Stopped':'');
  $('status').classList.toggle('busy',!!busy);$('demo').textContent=state.demoActive?'Stop demo':'Pointer demo';
- const message=s?.error||state.error||uiError;$('error').textContent=message||'';$('error').hidden=!message;
+ const message=s?.error||state.error||draftStorageError||uiError;$('error').textContent=message||'';$('error').hidden=!message;
  $('area').hidden=!s?.area;if(s?.area)$('areaText').textContent=`Area · ${Math.round(s.area.w)} × ${Math.round(s.area.h)} pt`;
  if(voiceReply===active&&spoken!==null&&answer&&s?.presentation!=='cursor'){
   let rest=answer.startsWith(spoken)?answer.slice(spoken.length):answer;
@@ -196,7 +221,7 @@ async function sendPrompt({id,prompt,context,sendMode,generation,consumeDraft=fa
   if(voiceReply===id&&spoken===null)spoken='';
   render(result);
   const d=draft(id);
-  if(consumeDraft&&d.generation===generation){d.text='';d.generation++;if(active===id)$('prompt').value=''}
+  if(consumeDraft&&d.generation===generation){d.text='';d.generation++;if(active===id)$('prompt').value='';publishDraft(id)}
   return true;
  }finally{sending.delete(id);paint()}
 }
@@ -207,7 +232,7 @@ async function submit(){
  if(!id){id=await makeSession(false);if(active!==id||draft(id)!==d)return false}
  return sendPrompt({id,prompt:text,context,sendMode,generation,consumeDraft:true});
 }
-window.baristaNativeDraft=payload=>acceptNativeDraft(payload);
+window.baristaNativeDraft=payload=>acceptNativeDraft(payload,true);
 window.baristaNativeSubmit=payload=>act(()=>acceptNativeDraft(payload)?submit():false);
 window.baristaNativeSession=payload=>act(()=>payload?.id===null?makeSession(true):chooseSession(payload?.id));
 window.baristaNativeStop=payload=>act(async()=>{
@@ -225,6 +250,7 @@ window.baristaNativeAdvanced=payload=>{
  advanced=payload.visible;document.body.dataset.advanced=String(advanced);$('drawer').hidden=!advanced;$('more').setAttribute('aria-expanded',advanced);if(advanced)showAnswer=true;paint();return true;
 };
 window.baristaNativeVoicePrepare=async payload=>{
+ if(native&&!nativeDraftReady)return null;
  if(!payload||payload.id!==active||!['command','dictation'].includes(payload.route)||typeof payload.captureID!=='string'||!payload.captureID||payload.captureID.length>128||usedCaptures.has(payload.captureID))return null;
  if(!online||(payload.route==='command'&&(current()?.status==='thinking'||sending.has(active)))){error('Stop the current turn or wait for CUA before speaking a command.');return null}
  cancelCapture();usedCaptures.add(payload.captureID);if(usedCaptures.size>64)usedCaptures.delete(usedCaptures.values().next().value);
@@ -294,7 +320,7 @@ $('new').onclick=()=>act(()=>makeSession(true));$('sessionChoice').onchange=()=>
 $('model').onchange=()=>{const id=active,model=$('model').value||null;act(()=>chooseModel(id,model))};
 $('mode').onchange=()=>{cancelCapture();mode=$('mode').value;publishNative()};$('showHistory').onclick=()=>{$('history').hidden=!$('history').hidden;if(!$('history').hidden)renderHistory()};
 $('readAloud').onclick=()=>act(()=>{const reply=latestAnswer();if(!reply)throw new Error('Ask a question first.');bridge({action:'speak',text:reply})});
-$('remove').onclick=()=>act(async()=>{if(!active)return;if(removeArmed!==active){removeArmed=active;$('remove').textContent='Confirm removal';return}const id=active;cancelCapture();render(await api('/remove',{id}));drafts.delete(id);removeArmed=null;$('remove').textContent='Remove'});
+$('remove').onclick=()=>act(async()=>{if(!active)return;if(removeArmed!==active){removeArmed=active;$('remove').textContent='Confirm removal';return}const id=active;cancelCapture();render(await api('/remove',{id}));drafts.delete(id);if(native)bridge({action:'draftForgotten',id});removeArmed=null;$('remove').textContent='Remove'});
 $('placeArea').onclick=()=>window.baristaSelection({x:Number($('areaX').value),y:Number($('areaY').value),w:Number($('areaW').value),h:Number($('areaH').value)});
 $('clearArea').onclick=()=>act(async()=>render(await api('/clear',{id:active})));
 $('areaStyle').onclick=()=>act(async()=>{spotlight=!spotlight;$('areaStyle').setAttribute('aria-pressed',spotlight);if(current()?.area)render(await api('/select',{id:active,rect:current().area,style:spotlight?'spotlight':'ring'}))});

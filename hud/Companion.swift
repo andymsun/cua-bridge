@@ -82,6 +82,13 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     var pageURL: URL!
     var appContext: [String: Any] = [:]
     var startupError = "Check that Node and this CUA checkout are available."
+    private lazy var draftStore = CompanionDrafts(directory: URL(fileURLWithPath: runDir))
+    private var savedDrafts: [String: CompanionDraft] = [:]
+    private var draftEdits: [String: Int] = [:], draftGenerations: [String: Int] = [:]
+    private var draftEpoch = 0, draftsReady = false
+    private var draftNotice = ""
+    private var quitID: UUID?
+    private var draftSessions = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -134,8 +141,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             web.topAnchor.constraint(equalTo: composer.bottomAnchor), web.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             web.trailingAnchor.constraint(equalTo: root.trailingAnchor), web.bottomAnchor.constraint(equalTo: root.bottomAnchor), height
         ])
-        composer.onDraft = { [weak self] in self?.nativeCall("baristaNativeDraft", $0) }
-        composer.onSubmit = { [weak self] in self?.nativeCall("baristaNativeSubmit", $0) }
+        composer.onDraft = { [weak self] in self?.cacheDraft($0); self?.nativeCall("baristaNativeDraft", $0) }
+        composer.onSubmit = { [weak self] in self?.cacheDraft($0); self?.nativeCall("baristaNativeSubmit", $0) }
         composer.onSession = { [weak self] payload in
             self?.nativeCall("baristaNativeSession", payload) { value in
                 if value == nil || value as? Bool == false { self?.composer.transportError("Could not change conversation. Try again.") }
@@ -254,12 +261,70 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         keyHeld = false; holdAction?.cancel(); cancelVoice()
         // An outside click leaves the composer and its draft in place; never retry focus.
     }
+    @discardableResult private func cacheDraft(_ payload: [String: Any]) -> Bool {
+        guard draftsReady, let id = payload["id"] as? String, draftSessions.contains(id),
+              let text = payload["text"] as? String, text.utf16.count <= 8000,
+              let edit = payload["edit"] as? Int, edit >= (draftEdits[id] ?? 0), edit <= 9_007_199_254_740_991 else { return false }
+        if let generation = payload["generation"] as? Int {
+            guard generation >= (draftGenerations[id] ?? 0), generation <= 9_007_199_254_740_991 else { return false }
+            draftGenerations[id] = generation
+        }
+        draftEdits[id] = edit
+        if (savedDrafts[id]?.text ?? "") == text { return true }
+        let revision = (savedDrafts[id]?.revision ?? 0) + 1
+        savedDrafts[id] = CompanionDraft(text: text, revision: revision)
+        draftStore.save(id: id, text: text, revision: revision) { [weak self] result in
+            DispatchQueue.main.async { self?.draftSaveResult(result) }
+        }
+        return true
+    }
+    private func draftSaveResult(_ result: Result<Void, Error>) {
+        switch result {
+        case .success: draftNotice = ""
+        case .failure(let error): draftNotice = "Drafts are not saved: \(error.localizedDescription) Copy your draft before you close the app. Check companion-drafts.json in this runtime's directory."
+        }
+        nativeCall("baristaDraftStorage", ["message": draftNotice])
+    }
+    private func restoreDrafts() {
+        let epoch = draftEpoch
+        draftStore.load { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self, self.draftEpoch == epoch else { return }
+                switch result {
+                case .success(let saved): self.savedDrafts = saved
+                case .failure(let error):
+                    self.savedDrafts = [:]
+                    self.draftNotice = "Saved drafts could not be read: \(error.localizedDescription) The file was not changed. Move companion-drafts.json aside, then reopen the app."
+                }
+                let rows = self.savedDrafts.mapValues { ["text": $0.text, "revision": $0.revision] as [String: Any] }
+                let data = rows.map { id, row in (id, row.merging(["edit": self.draftEdits[id] ?? 0]) { _, next in next }) }
+                self.nativeCall("baristaRestoreDrafts", ["drafts": Dictionary(uniqueKeysWithValues: data), "activeSessionID": self.composer.activeSessionID as Any? ?? NSNull()]) { [weak self] value in
+                    guard let self = self, value as? Bool != true else { return }
+                    self.composer.status.stringValue = "Draft restore unavailable"
+                    self.composer.status.toolTip = "This popup needs the current local CUA server. Finish active CUA sessions, restart that runtime, then reopen Andy. Saved drafts were not changed."
+                }
+                self.nativeCall("baristaDraftStorage", ["message": self.draftNotice])
+            }
+        }
+    }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if let composer = composer { cacheDraft(composer.draftPayload) }
+        cancelVoice(); voice.silence(); draftEpoch += 1; draftsReady = false; draftGenerations.removeAll()
+        composer?.beginRestore()
+    }
     func nativeCall(_ callback: String, _ payload: [String: Any], completion: ((Any?) -> Void)? = nil) {
         guard let web = web else { completion?(nil); return }
-        web.callAsyncJavaScript("return window[callback]?.(payload)", arguments: ["callback": callback, "payload": payload], in: nil, in: .page) { [weak self] result in
+        let epoch = draftEpoch
+        let tagged = ["baristaNativeDraft", "baristaNativeSubmit", "baristaRestoreDrafts", "baristaDraftStorage"].contains(callback)
+        let data = tagged ? payload.merging(["epoch": epoch]) { _, next in next } : payload
+        web.callAsyncJavaScript("return window[callback]?.(payload)", arguments: ["callback": callback, "payload": data], in: nil, in: .page) { [weak self] result in
+            guard let self = self, self.draftEpoch == epoch else { return }
             switch result {
             case .success(let value): completion?(value)
-            case .failure(let error): self?.composer?.transportError(error.localizedDescription); completion?(nil)
+            case .failure(let error):
+                if self.draftsReady { self.composer?.transportError(error.localizedDescription) }
+                else { self.composer?.status.stringValue = "Draft restore unavailable"; self.composer?.status.toolTip = error.localizedDescription }
+                completion?(nil)
             }
         }
     }
@@ -273,10 +338,11 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == "127.0.0.1",
+        guard message.webView === web, message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == "127.0.0.1",
               message.frameInfo.securityOrigin.port == (pageURL.port ?? 80),
               message.frameInfo.request.url?.scheme == pageURL.scheme, message.frameInfo.request.url?.path == pageURL.path,
-              let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
+              let body = message.body as? [String: Any], let action = body["action"] as? String,
+              body["epoch"] as? Int == draftEpoch else { return }
         switch action {
         case "select": selectArea()
         case "draw": if let mode=body["kind"] as? String,["circle","highlight","arrow","draw"].contains(mode){selectArea(mode:mode)}
@@ -291,7 +357,19 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             if let url = Self.modelDocumentation(body["model"]), !NSWorkspace.shared.open(url) {
                 evaluate("window.baristaNativeError?.(\(json("The browser could not open the model specifications. Open \(url.absoluteString) in your browser.")))")
             }
-        case "composerState": composer.apply(body)
+        case "draftsRestored": draftsReady = true
+        case "draftChanged": cacheDraft(body)
+        case "draftForgotten":
+            guard draftsReady, let id = body["id"] as? String else { return }
+            savedDrafts.removeValue(forKey: id); draftEdits.removeValue(forKey: id); draftGenerations.removeValue(forKey: id); draftSessions.remove(id)
+            draftStore.forget(id: id) { [weak self] result in DispatchQueue.main.async { self?.draftSaveResult(result) } }
+        case "composerState":
+            guard draftsReady, !terminating else { return }
+            draftSessions = Set((body["sessions"] as? [[String: Any]] ?? []).prefix(8).compactMap { $0["id"] as? String })
+            if let id = body["activeSessionID"] as? String {
+                guard cacheDraft(["id": id, "text": body["draft"] ?? NSNull(), "edit": body["edit"] ?? NSNull(), "generation": body["generation"] ?? NSNull()]) else { return }
+            }
+            composer.apply(body)
         case "hubState":
             hubClients = Array(((body["hub"] as? [String: Any])?["clients"] as? [[String: Any]] ?? []).prefix(32))
             hub.apply(body)
@@ -321,6 +399,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         nativeCall("baristaContext", appContext)
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        restoreDrafts()
         nativeCall("baristaContext", appContext)
         if panel.isVisible { nativeCall("baristaOpened", [:]) }
         if let v = CompanionVoice.preferredVoice() { nativeCall("baristaVoiceInfo", ["name": v.name, "enhanced": v.quality.rawValue > 1]) }
@@ -335,7 +414,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         app.activate(options: [])
     }
     func beginVoice(route: String) {
-        guard voiceCaptureID == nil, !composer.editor.hasMarkedText() else { return }
+        guard draftsReady, !terminating, voiceCaptureID == nil, !composer.editor.hasMarkedText() else { return }
         let id = UUID().uuidString
         voiceCaptureID = id; voicePreparing = true
         nativeCall("baristaNativeVoicePrepare", ["id": composer.activeSessionID as Any? ?? NSNull(), "captureID": id, "route": route]) { [weak self] value in
@@ -443,14 +522,28 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let pageURL = pageURL else { return .terminateNow }
-        if terminating { return .terminateLater }; terminating = true
+        if terminating { return .terminateLater }
+        cacheDraft(composer.draftPayload); cancelVoice(); voice.silence()
+        terminating = true; let requestID = UUID(); quitID = requestID
+        composer.beginRestore(); composer.status.stringValue = "Saving drafts…"
         var components = URLComponents(url: pageURL, resolvingAgainstBaseURL: false)!
         components.path = "/api/companion/stop-all"
         var request = URLRequest(url: components.url!); request.httpMethod = "POST"; request.timeoutInterval = 3
         request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = Data("{}".utf8)
         let finish = { [weak self] in
-            guard let self = self, self.terminating else { return }
-            self.terminating = false; NSApp.reply(toApplicationShouldTerminate: true)
+            guard let self = self, self.terminating, self.quitID == requestID else { return }
+            self.draftStore.flush { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self = self, self.terminating, self.quitID == requestID else { return }
+                    self.terminating = false; self.quitID = nil
+                    switch result {
+                    case .success: NSApp.reply(toApplicationShouldTerminate: true)
+                    case .failure:
+                        self.draftSaveResult(result); NSApp.reply(toApplicationShouldTerminate: false)
+                        self.show(); self.nativeCall("baristaOpened", [:])
+                    }
+                }
+            }
         }
         URLSession.shared.dataTask(with: request) { _, _, error in
             if let error = error { NSLog("Companion stop on quit: %@", error.localizedDescription) }
