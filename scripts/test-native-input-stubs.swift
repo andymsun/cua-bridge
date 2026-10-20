@@ -47,7 +47,7 @@ let kAXWindowAttribute = "AXWindow", kAXWindowsAttribute = "AXWindows", kAXChild
 let kAXFocusedWindowAttribute = "AXFocusedWindow", kAXMainAttribute = "AXMain", kAXSelectedAttribute = "AXSelected"
 let kAXMinimizedAttribute = "AXMinimized", kAXTitleAttribute = "AXTitle", kAXDescriptionAttribute = "AXDescription"
 let kAXValueAttribute = "AXValue", kAXPlaceholderValueAttribute = "AXPlaceholderValue"
-enum AXError: Int32 { case success = 0, failure = -25200, apiDisabled = -25211, attributeUnsupported = -25205, noValue = -25212 }
+enum AXError: Int32 { case success = 0, failure = -25200, invalidUIElement = -25202, cannotComplete = -25204, attributeUnsupported = -25205, actionUnsupported = -25206, notImplemented = -25208, apiDisabled = -25211, noValue = -25212 }
 enum AXValueType { case cgPoint, cgSize }
 final class AXValue: NSObject {
     let point: CGPoint?
@@ -78,6 +78,9 @@ final class AXUIElement: NSObject {
     var timeoutError = AXError.success
     var actions: [String] = []
     var successfulActions = Set<String>()
+    var actionErrors: [String: AXError] = [:], setErrors: [String: AXError] = [:]
+    var effectActions = Set<String>(), effects = 0, selectionEffect = false
+    var settableError = AXError.success
     var settable = Set<String>()
     var hit: AXUIElement?
     var hitError = AXError.success
@@ -107,12 +110,19 @@ func AXUIElementCopyActionNames(_ el: AXUIElement, _ result: UnsafeMutablePointe
 }
 func AXUIElementPerformAction(_ el: AXUIElement, _ action: CFString) -> AXError {
     axCalls.append("perform \(el.name) \(action)")
-    return el.successfulActions.contains(action as String) ? .success : .failure
+    if el.effectActions.contains(action as String) { el.effects += 1 }
+    if let error = el.actionErrors[action as String] { return error }
+    return el.successfulActions.contains(action as String) ? .success : .actionUnsupported
+}
+func AXUIElementIsAttributeSettable(_ el: AXUIElement, _ attribute: CFString, _ result: UnsafeMutablePointer<DarwinBoolean>) -> AXError {
+    result.pointee = DarwinBoolean(el.settable.contains(attribute as String)); return el.settableError
 }
 func AXUIElementSetAttributeValue(_ el: AXUIElement, _ attribute: CFString, _ value: CFTypeRef) -> AXError {
     let name = attribute as String
     axCalls.append("set \(el.name) \(name)")
-    guard el.settable.contains(name) else { return .failure }
+    if el.selectionEffect && name == kAXSelectedAttribute { el.effects += 1; el.attrs[name] = value }
+    if let error = el.setErrors[name] { return error }
+    guard el.settable.contains(name) else { return .attributeUnsupported }
     el.attrs[name] = value; return .success
 }
 @discardableResult func AXUIElementGetPid(_ el: AXUIElement, _ result: UnsafeMutablePointer<pid_t>) -> AXError {

@@ -464,12 +464,34 @@ func center(_ pid: pid_t, _ gen: String?, _ el: AXUIElement) -> [String: Double]
     return ["x": Double((f.midX - t.window.minX) / t.window.width), "y": Double((f.midY - t.window.minY) / t.window.height)]
 }
 
+struct UnsupportedPress: Error {}
+
+func performPressAction(_ el: AXUIElement, _ action: String) throws -> Bool {
+    let result = AXUIElementPerformAction(el, action as CFString)
+    switch result {
+    case .success: return true
+    case .actionUnsupported, .notImplemented: return false
+    default: throw AgentError("Accessibility action \(action) returned \(result.rawValue). Its outcome is unknown; no fallback was sent. Read the app before you try again.", code: "action_outcome_unknown")
+    }
+}
+
 func press(_ el: AXUIElement) throws {
     let acts = axActions(el)
-    for a in ["AXPress", "AXConfirm", "AXPick", "AXOpen"] where acts.contains(a) { if axPerform(el, a) { return } }
-    if axSet(el, kAXSelectedAttribute, kCFBooleanTrue) { return }
-    if axPerform(el, "AXPress") { return }
-    throw AgentError("Element does not accept a press. Available actions: \(acts.joined(separator: ", "))")
+    for a in ["AXPress", "AXConfirm", "AXPick", "AXOpen"] where acts.contains(a) { if try performPressAction(el, a) { return } }
+    var settable: DarwinBoolean = false
+    let support = AXUIElementIsAttributeSettable(el, kAXSelectedAttribute as CFString, &settable)
+    guard support == .success || support == .attributeUnsupported || support == .notImplemented else {
+        throw AgentError("Cannot check element selection support (\(support.rawValue)). No fallback was sent. Read the app before you try again.", code: "click_target_unavailable")
+    }
+    if support == .success && settable.boolValue {
+        let result = AXUIElementSetAttributeValue(el, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+        if result == .success { return }
+        guard result == .attributeUnsupported || result == .notImplemented else {
+            throw AgentError("Accessibility selection returned \(result.rawValue). Its outcome is unknown; no fallback was sent. Read the app before you try again.", code: "action_outcome_unknown")
+        }
+    }
+    if !acts.contains("AXPress"), try performPressAction(el, "AXPress") { return }
+    throw UnsupportedPress()
 }
 
 // MARK: - passive exact lookup
@@ -1019,16 +1041,16 @@ func postText(pid: pid_t, text: String) {
 /// Middle clicks have no AX equivalent and always need a validated mouse target.
 func click(_ el: AXUIElement, in t: Table, button: String, count: Int) throws {
     if button.hasPrefix("r") {
-        if axActions(el).contains("AXShowMenu"), axPerform(el, "AXShowMenu") { return }
+        if axActions(el).contains("AXShowMenu"), try performPressAction(el, "AXShowMenu") { return }
         return try eventClick(el, in: t, button: button, count: 1)
     }
     if button.hasPrefix("m") { return try eventClick(el, in: t, button: button, count: count) }
     if count >= 2 {
-        if axActions(el).contains("AXOpen"), axPerform(el, "AXOpen") { return }
+        if axActions(el).contains("AXOpen"), try performPressAction(el, "AXOpen") { return }
         return try eventClick(el, in: t, button: button, count: count)
     }
-    // plain groups and custom views (common in Electron apps) have no press action
-    do { try press(el) } catch { try eventClick(el, in: t, button: button, count: 1) }
+    // Only a definite unsupported action permits fallback; an uncertain mutation must stop.
+    do { try press(el) } catch is UnsupportedPress { try eventClick(el, in: t, button: button, count: 1) }
 }
 
 /// Scroll the nearest scroll area at or above an element by pages.
@@ -1319,7 +1341,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         let e = try el(); let name = req["name"] as? String ?? ""
         let acts = axActions(e)
         let actual = acts.first { $0 == name || $0 == "AX" + name.replacingOccurrences(of: " ", with: "") } ?? name
-        guard axPerform(e, actual) else { throw AgentError("Action \(name) failed. Available: \(acts.joined(separator: ", "))") }
+        guard try performPressAction(e, actual) else { throw AgentError("Action \(name) is unsupported. Available: \(acts.joined(separator: ", "))") }
         return ["center": center(try needPid(), gen, e) as Any]
     case "scroll":
         let dir = (req["direction"] as? String ?? "down").lowercased(), pages = max(1, (req["pages"] as? NSNumber)?.intValue ?? 1)

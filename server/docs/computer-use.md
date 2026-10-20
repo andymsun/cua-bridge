@@ -56,6 +56,12 @@ a visible positive target rectangle, full containment within applicable ancestor
 clips, and a matching hit in that window. An uncertain target fails with
 `click_target_unavailable`; CUA does not move the point onto another control.
 
+Fallback also needs a definite unsupported Accessibility result. An uncertain
+press, open, menu, or selection result returns `action_outcome_unknown`, with the
+AX error code. CUA sends no later AX action or mouse event for that request.
+Selection support must be readable before CUA tries that write. An unsupported
+AXPress is not tried twice. Check the app before you repeat an uncertain action.
+
 Mouse, drag, and coordinate-scroll events carry both the selected window ID and
 its window-local point. The public `NSEvent` constructor supplies the window ID.
 Optional private CoreGraphics calls restore the local point after the global point

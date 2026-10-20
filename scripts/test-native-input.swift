@@ -315,5 +315,59 @@ check("buttons", "event construction failure posts no movement or partial click"
         try refuse(f, button: button)
     }
 }
+check("buttons", "uncertain press, open, and menu results never send a second action") {
+    for (action, button, count) in [("AXPress", "left", 1), ("AXOpen", "left", 2), ("AXShowMenu", "right", 1)] {
+        for error in [AXError.cannotComplete, .failure, .apiDisabled, .invalidUIElement] {
+            let f = fixture(); f.target.actions = [action]; f.target.actionErrors[action] = error; f.target.effectActions = [action]
+            var failure: AgentError?
+            do { _ = try handle(f.request(button: button, count: count)) } catch let e as AgentError { failure = e }
+            try expect(failure?.code == "action_outcome_unknown", "uncertain action did not stop: \(axCalls), \(posted.count) mouse events")
+            try expect(f.target.effects == 1 && axCalls == ["perform target \(action)"] && posted.isEmpty, "uncertain action caused more input")
+            try expect(tables[f.table.generation] == nil, "uncertain action must consume its snapshot")
+        }
+    }
+}
+check("buttons", "uncertain selection never continues to AXPress or mouse input") {
+    for error in [AXError.cannotComplete, .failure] {
+        let f = fixture(); f.target.settable = [kAXSelectedAttribute]; f.target.setErrors[kAXSelectedAttribute] = error; f.target.selectionEffect = true
+        var failure: AgentError?
+        do { _ = try handle(f.request()) } catch let e as AgentError { failure = e }
+        try expect(failure?.code == "action_outcome_unknown", "uncertain selection fell through: \(axCalls), \(posted.count) mouse events")
+        try expect(f.target.effects == 1 && axCalls == ["set target AXSelected"] && posted.isEmpty, "selection caused more input")
+    }
+}
+check("buttons", "definitely unsupported press actions allow fallback without retrying AXPress") {
+    for error in [AXError.actionUnsupported, .notImplemented] {
+        let f = fixture(); f.target.actions = ["AXPress", "AXConfirm", "AXPick", "AXOpen"]
+        f.target.actionErrors = Dictionary(uniqueKeysWithValues: f.target.actions.map { ($0, error) })
+        _ = try handle(f.request()); try expectMouse(CGPoint(x: 220, y: 230))
+        try expect(axCalls.filter { $0 == "perform target AXPress" }.count == 1, "unsupported AXPress was repeated")
+    }
+}
+check("buttons", "unsupported open and menu actions keep validated mouse fallback") {
+    for (action, button, count) in [("AXOpen", "left", 2), ("AXShowMenu", "right", 1)] {
+        let f = fixture(); f.target.actions = [action]; f.target.actionErrors[action] = .actionUnsupported
+        _ = try handle(f.request(button: button, count: count))
+        try expectMouse(CGPoint(x: 220, y: 230), button: button == "right" ? .right : .left, count: count)
+        try expect(axCalls == ["perform target \(action)"], "unsupported action ran more AX actions")
+    }
+}
+check("buttons", "successful selection and unadvertised AXPress stay semantic") {
+    let f = fixture(); f.target.settable = [kAXSelectedAttribute]
+    _ = try handle(f.request()); try expect(posted.isEmpty && axCalls == ["set target AXSelected"], "successful selection emitted more input")
+    let g = fixture(); g.target.successfulActions = ["AXPress"]
+    _ = try handle(g.request()); try expect(posted.isEmpty && axCalls.filter { $0.hasPrefix("perform") } == ["perform target AXPress"], "unadvertised press no longer works")
+}
+check("buttons", "unreadable selection support stops before mutation") {
+    let f = fixture(); f.target.settableError = .cannotComplete
+    try refuse(f); try expect(axCalls.isEmpty, "unreadable selection support caused input")
+}
+check("buttons", "explicit named actions never have a mouse fallback") {
+    let f = fixture(); f.target.actions = ["AXOpen"]; f.target.actionErrors["AXOpen"] = .cannotComplete; f.target.effectActions = ["AXOpen"]
+    var request = f.request(); request["cmd"] = "action"; request["name"] = "AXOpen"
+    var failure: AgentError?
+    do { _ = try handle(request) } catch let e as AgentError { failure = e }
+    try expect(failure != nil && posted.isEmpty && f.target.effects == 1 && axCalls == ["perform target AXOpen"], "named action retried input")
+}
 print("NATIVE_INPUT_CHECKS passed=\(passed) failed=\(failed)")
 exit(failed == 0 ? 0 : 1)

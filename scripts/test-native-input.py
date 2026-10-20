@@ -56,6 +56,7 @@ parts = [
 ]
 handler = extract('func handle(_ req:', '\n    case "status":')
 handler += '\n' + extract('    case "press":', '    case "locate":')
+handler += '\n' + extract('    case "action":', '    case "scroll":')
 handler += '\n    default: fatalError("Unexpected fixture command: \\(cmd)")\n    }\n}\n'
 parts.append(handler)
 production = '\n'.join(parts)
