@@ -244,6 +244,13 @@ try{
  });
  assert.deepEqual(await voicePage.evaluate(()=>window.nativeMessages.filter(m=>m.action==='speak').map(m=>m.text)),['One sentence. ','Another sentence.'],'stream and final do not repeat speech');
  await voicePage.evaluate(()=>{
+  nativeMessages=[];voiceReply=active;spoken='';
+  const next={...state,sessions:[{id:active,name:'Spoken cursor fixture',status:'thinking',route:'model',presentation:'cursor',messages:[{role:'assistant',text:'Look at this control. '}]}]};
+  render(next);render(next);next.sessions[0].messages[0].text+='Use it when ready.';next.sessions[0].status='done';render(next);render(next);
+ });
+ assert.deepEqual(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='speak').map(m=>m.text)),['Look at this control. ','Use it when ready.'],'a voice command can speak while its cursor supplies the visual answer');
+ assert.equal(await voicePage.locator('#answer').isVisible(),false,'spoken cursor guidance does not expand a secondary text answer');
+ await voicePage.evaluate(()=>{
   nativeMessages=[];
   const sessions=Array.from({length:40},(_,i)=>({id:'fixture-'+i,name:'N'.repeat(300),status:'done',messages:[{role:'assistant',text:'private-secret'}],key:'private-secret',token:'private-secret',route:'local',presentation:'cursor'}));
   active='fixture-0';showAnswer=true;

@@ -52,13 +52,20 @@ final class AreaSelectionView: NSView {
         path.lineWidth=PointerGeometry.strokeWidth(kind:mode,rect:rect);path.lineCapStyle = mode == "highlight" ? .butt : .round;path.lineJoinStyle = .round
         (mode == "highlight" ? color.withAlphaComponent(0.3) : color).setStroke();path.stroke()
     }
-    override func mouseDown(with event:NSEvent){start=NSEvent.mouseLocation;end=start;points=[start!];update?(start!,end!,points)}
+    private func gesturePoint(_ event: NSEvent) -> CGPoint? {
+        guard let window = window, event.windowNumber == window.windowNumber else { start = nil; end = nil; points = []; return nil }
+        return window.convertPoint(toScreen: event.locationInWindow)
+    }
+    override func mouseDown(with event:NSEvent){guard let p=gesturePoint(event) else{return};start=p;end=p;points=[p];update?(p,p,points)}
     override func mouseDragged(with event:NSEvent){
-        guard let a=start else{return};let p=NSEvent.mouseLocation;end=p
+        guard let a=start,let p=gesturePoint(event) else{return};end=p
         if let last=points.last,hypot(last.x-p.x,last.y-p.y)>=2{if points.count>=512{points=points.enumerated().filter{$0.offset%2==0}.map{$0.element}};points.append(p)}
         update?(a,p,points)
     }
-    override func mouseUp(with event:NSEvent){if let a=start{let b=NSEvent.mouseLocation;if points.count<512{points.append(b)};finish?(a,b,points)}}
+    override func mouseUp(with event:NSEvent){
+        guard let a=start,let b=gesturePoint(event) else{return};start=nil;end=b
+        if points.count<512{points.append(b)}else{points[points.count-1]=b};finish?(a,b,points)
+    }
     override func cancelOperation(_ sender:Any?){cancel?()}
     override func keyDown(with event:NSEvent){if event.keyCode==53{cancel?()}else{super.keyDown(with:event)}}
 }

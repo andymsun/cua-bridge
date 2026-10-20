@@ -265,7 +265,7 @@ function paint(){
  $('status').classList.toggle('busy',!!busy);$('demo').textContent=state.demoActive?'Stop demo':'Pointer demo';
  const message=s?.error||state.error||draftStorageError||uiError;$('error').textContent=message||'';$('error').hidden=!message;
  $('area').hidden=!s?.area;if(s?.area)$('areaText').textContent=`Area · ${Math.round(s.area.w)} × ${Math.round(s.area.h)} pt`;
- if(voiceReply===active&&spoken!==null&&answer&&s?.presentation!=='cursor'){
+ if(voiceReply===active&&spoken!==null&&answer){
   let rest=answer.startsWith(spoken)?answer.slice(spoken.length):answer;
   if(!answer.startsWith(spoken)&&spoken.includes(answer))rest='';
   const complete=busy?(rest.match(/^[\s\S]*?[.!?](?:\s|$)/)?.[0]||''):rest;

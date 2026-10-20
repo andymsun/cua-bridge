@@ -56,6 +56,46 @@ import AppKit
         precondition(pid == 42 && lookups == [4, 42], "only registered ancestry with a matching live bundle is considered")
         precondition(CompanionContext.hostPID(["capabilities": ["openHost": false], "host": client["host"]!]) { _ in "example.fixture" } == nil)
         precondition(CompanionContext.hostPID(client) { _ in nil } == nil, "exited hosts never resolve to an arbitrary app")
-        print("PASS headless popup focus/drafts, fractional identity context, selected window, and host ancestry validation")
+        let canvasWindow = NSWindow(contentRect: CGRect(x: -1700, y: 100, width: 400, height: 300), styleMask: .borderless, backing: .buffered, defer: false)
+        canvasWindow.isReleasedWhenClosed = false
+        let canvas = AreaSelectionView(frame: CGRect(x: 0, y: 0, width: 400, height: 300))
+        canvasWindow.contentView = canvas
+        let down = CGPoint(x: 17.25, y: 31.5), drag = CGPoint(x: 93.5, y: 110.25), up = CGPoint(x: 141.75, y: 169.5)
+        func mouse(_ type: NSEvent.EventType, _ point: CGPoint, window: Int? = nil) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window ?? canvasWindow.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        }
+        func near(_ a: CGPoint?, _ b: CGPoint) -> Bool { a.map { hypot($0.x - b.x, $0.y - b.y) < 0.001 } ?? false }
+        let pointer = NSEvent.mouseLocation
+        var completed = 0, finalPoints: [CGPoint] = []
+        canvas.finish = { a, b, points in
+            precondition(near(a, canvasWindow.convertPoint(toScreen: down)) && near(b, canvasWindow.convertPoint(toScreen: up)), "gesture bounds come from their own down and up events")
+            completed += 1; finalPoints = points
+        }
+        for mode in ["select", "circle", "highlight", "arrow", "draw"] {
+            canvas.mode = mode
+            canvas.mouseDown(with: mouse(.leftMouseDown, down))
+            precondition(near(canvas.start, canvasWindow.convertPoint(toScreen: down)), "down uses the queued event, not current global mouse position")
+            canvas.mouseDragged(with: mouse(.leftMouseDragged, drag))
+            precondition(near(canvas.end, canvasWindow.convertPoint(toScreen: drag)), "drag preserves its event position on a negative-origin display")
+            canvas.mouseUp(with: mouse(.leftMouseUp, up))
+            precondition(finalPoints.count == 3 && near(finalPoints[1], canvasWindow.convertPoint(toScreen: drag)), "freehand points keep the event path")
+            canvas.mouseUp(with: mouse(.leftMouseUp, up))
+        }
+        precondition(completed == 5, "each gesture finishes once")
+        canvas.mouseDown(with: mouse(.leftMouseDown, down))
+        for i in 1...511 { canvas.mouseDragged(with: mouse(.leftMouseDragged, CGPoint(x: down.x + CGFloat(i) * 3, y: down.y))) }
+        canvas.mouseUp(with: mouse(.leftMouseUp, up))
+        precondition(finalPoints.count == 512 && near(finalPoints.last, canvasWindow.convertPoint(toScreen: up)), "the point cap still keeps the actual final event")
+        canvas.mouseDown(with: mouse(.leftMouseDown, down))
+        canvas.mouseDragged(with: mouse(.leftMouseDragged, drag, window: canvasWindow.windowNumber + 100000))
+        canvas.mouseUp(with: mouse(.leftMouseUp, up))
+        precondition(completed == 6 && canvas.start == nil, "a foreign-window event cannot complete an old drag")
+        canvas.mouseDown(with: mouse(.leftMouseDown, down)); canvasWindow.contentView = NSView()
+        canvas.mouseUp(with: mouse(.leftMouseUp, up))
+        precondition(completed == 6 && canvas.start == nil && canvas.points.isEmpty, "a detached view cancels stale gesture state")
+        precondition(!canvasWindow.isVisible, "synthetic gestures never expose an overlay or send system input")
+        if NSEvent.mouseLocation != pointer { print("NOTE real pointer changed during this direct-handler check; no input events were posted") }
+        canvasWindow.close()
+        print("PASS popup focus/drafts, identity, host ancestry, and event-bound drawing in all five modes")
     }
 }
