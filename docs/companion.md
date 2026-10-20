@@ -46,6 +46,8 @@ File copies survive app restarts in `companion-files` under the selected runtime
 
 Confirm **Remove** beside a file to delete its local copy and stop its reuse in future turns. This does not retract data already sent to a provider or remove earlier answers from history. Conversation removal also removes its unchanged file copies. Original files stay untouched. A changed copy stays untouched; move it out of `companion-files` before removing its reference. A missing copy can be removed from the list.
 
+Send and Continue wait for file uploads and confirmed removals in that page. This guard stays active when you change conversations and return. A delayed file error stays with its conversation. Keyboard focus stays on the confirmation, then moves to a remaining file or Attach files.
+
 The cache has a total limit of 64 copies and 128 MiB, including copies left by an interrupted upload. Those copies are not deleted automatically. If the cache is full, check that folder and keep any needed copies elsewhere before deleting unused copies. File checks use a separate signed process, not the GUI or Accessibility helper. The helper has a CPU limit and checks elapsed time, memory use, image dimensions, and page count. These checks do not prove a document is harmless. Missing native file checks produce an error, not a validation bypass.
 
 ## Guide, point, and act

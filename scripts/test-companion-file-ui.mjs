@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright-core";
+import { test } from "node:test";
 
 const dir = fs.mkdtempSync(path.join(process.argv[2] ?? os.tmpdir(), "barista-file-ui-"));
 process.env.CUA_RUN_DIR = dir; process.env.CUA_CONFIG = path.join(dir, "config.json");
@@ -21,6 +22,29 @@ const browser = await chromium.launch({executablePath:findExecutable(),headless:
 const page = await browser.newPage({viewport:{width:360,height:700}}), errors = [];
 page.on("pageerror", e => errors.push(e.message));
 const file = {name:"lesson.txt",mimeType:"text/plain",buffer:Buffer.from("Owned reference: CAFE-731")};
+async function journey(t, native = false) {
+  const a = companion.create({name:"Journey A"}).id, b = companion.create({name:"Journey B"}).id;
+  const page = await browser.newPage({viewport:{width:320,height:700}}), releases = [];
+  page.setDefaultTimeout(8000); page.on("pageerror", e => errors.push(e.message));
+  t.after(async () => { for (const release of releases) release(); await page.close(); for (const id of [a,b]) if (companion.sessions.has(id)) companion.remove(id); });
+  if (native) await page.addInitScript(()=>{window.nativeMessages=[];window.webkit={messageHandlers:{barista:{postMessage:m=>nativeMessages.push(m)}}}});
+  await page.goto(origin+"/companion?t=fixture"); await page.waitForFunction(()=>online);
+  if (native) await page.evaluate(()=>baristaRestoreDrafts({epoch:7,drafts:{}}));
+  await page.evaluate(id=>chooseSession(id),a);
+  async function gate(routeName, afterServer = false) {
+    let release, entered; const held = new Promise(r=>release=r), ready = new Promise(r=>entered=r); releases.push(release);
+    await page.route("**/api/companion/"+routeName, async route=>{
+      const response = afterServer ? await route.fetch() : null; entered(); await held;
+      if (response) await route.fulfill({response}); else await route.continue();
+    },{times:1});
+    return {ready,release};
+  }
+  async function upload(name, text) {
+    const picker = page.waitForEvent("filechooser"); await page.getByRole("button",{name:"Attach files",exact:true}).click();
+    await (await picker).setFiles({name,mimeType:"text/plain",buffer:Buffer.from(text)});
+  }
+  return {page,a,b,gate,upload};
+}
 try {
   await page.goto(origin+"/companion?t=fixture"); await page.waitForFunction(()=>online);
   assert.equal(await page.getByRole("button",{name:"Attach files",exact:true}).count(),1,"Explicit file attachment control exists");
@@ -67,6 +91,70 @@ try {
   assert.equal(await native.evaluate(({valid})=>baristaFilesAdd({...valid,files:[{name:'native.txt',data:btoa('Native owned reference')}]}),{valid}),true);
   assert.equal(companion.get(other.id).files.length,1);
   assert.equal(await native.evaluate(()=>nativeMessages.filter(m=>m.action==='composerState').at(-1).fileCount),1);
+  console.log(JSON.stringify({browserPicker:true,paste:true,drop:true,reload:true,nativeEpoch:true,conversationBinding:true,screenshots:dir}));
+  for(const afterServer of [false,true])await test(`confirmed removal blocks native Send and Continue (${afterServer?'SSE before HTTP':'request in transit'})`, async t=>{
+    const {page,a,b,gate} = await journey(t,true);
+    await companion.addFile(a,{name:"remove-me.txt",data:Buffer.from("OWNED-REMOVAL-REFERENCE").toString("base64")});
+    companion.get(a).guide={id:"owned-step",app:{name:"Owned fixture"},windowTitle:"Owned window",contains:"Done",label:"Owned step"}; companion.changed();
+    await page.waitForFunction(()=>current()?.files?.length===1&&current()?.guide?.id==='owned-step');
+    const prompt="Answer without the removed reference "+a;
+    await page.evaluate(text=>baristaNativeDraft({epoch:7,id:active,text,edit:1}),prompt);
+    const held = await gate("file-remove",afterServer);
+    await page.getByRole("button",{name:"Remove file remove-me.txt",exact:true}).click();
+    await page.getByRole("button",{name:"Confirm file removal remove-me.txt",exact:true}).click(); await held.ready;
+    assert.equal(await page.evaluate(()=>filesBusy(active)),true);
+    assert.equal(await page.evaluate(()=>nativeMessages.filter(m=>m.action==='composerState').at(-1).filesBusy),true);
+    assert.equal(await page.locator("#send").isDisabled(),true); assert.equal(await page.locator("#continueGuide").isDisabled(),true);
+    assert.equal(await page.evaluate(()=>baristaNativeSubmit({epoch:7,id:active,text:draft().text,edit:draft().edit})),false);
+    assert.equal(await page.evaluate(()=>baristaNativeContinue({id:active,guideId:current().guide.id})),false);
+    assert.match(await page.locator("#error").textContent(),/file changes/);
+    assert.equal(companion.get(a).messages.length,0);
+    await page.evaluate(id=>chooseSession(id),b); await page.evaluate(id=>chooseSession(id),a);
+    assert.equal(await page.evaluate(()=>filesBusy(active)),true);
+    held.release(); await page.waitForFunction(()=>current()?.files?.length===0&&!filesBusy(active));
+    assert.equal(await page.evaluate(()=>baristaNativeSubmit({epoch:7,id:active,text:draft().text,edit:draft().edit})),true);
+    await page.waitForFunction(()=>current()?.status==='paused');
+    assert.equal(companion.get(a).error,null,"The existing guide remains paused after the question");
+    assert.equal(companion.get(a).messages[0].text,prompt);assert.equal(companion.get(a).messages[1].text,"Owned file received");
+    const sent=fs.readFileSync(record,"utf8"); assert(sent.includes(prompt)); assert(!sent.includes("OWNED-REMOVAL-REFERENCE"));
+  });
+  await test("an upload in transit stays busy across conversation changes", async t=>{
+    const {page,a,b,gate,upload} = await journey(t);
+    await page.locator("#prompt").fill("Use the slow reference");
+    const held = await gate("file-add"); await upload("slow.txt","OWNED-SLOW-REFERENCE"); await held.ready;
+    assert.equal(companion.get(a).uploads.size,0,"The request has not reached the server");
+    await page.evaluate(id=>chooseSession(id),b); assert.equal(await page.evaluate(()=>filesBusy(active)),false);
+    await page.evaluate(id=>chooseSession(id),a); assert.equal(await page.locator("#send").isDisabled(),true);
+    assert.notEqual(await page.locator("#fileProgress").textContent(),"");
+    held.release(); await page.waitForFunction(()=>current()?.files?.length===1&&!filesBusy(active));
+    await page.getByRole("button",{name:"Send question",exact:true}).click(); await page.waitForFunction(()=>current()?.status==='done');
+    assert.match(fs.readFileSync(record,"utf8"),/OWNED-SLOW-REFERENCE/);
+  });
+  await test("a late upload error remains with its owning conversation", async t=>{
+    const {page,a,b,gate,upload} = await journey(t);
+    const held = await gate("file-add",true); await upload("invalid.exe","Unsupported owned fixture"); await held.ready;
+    await page.evaluate(id=>chooseSession(id),b); await page.locator("#prompt").fill("Keep the other question");
+    held.release(); await page.waitForFunction(id=>!filesBusy(id),a);
+    assert.equal(await page.locator("#error").isVisible(),false);
+    assert.equal(await page.locator("#prompt").inputValue(),"Keep the other question");
+    await page.evaluate(id=>chooseSession(id),a); await page.locator("#error").waitFor({state:"visible"});
+    assert.match(await page.locator("#error").textContent(),/PNG, JPEG, PDF/);
+    await upload("valid.txt","Corrected reference"); await page.waitForFunction(()=>current()?.files?.length===1&&!filesBusy(active));
+    assert.equal(await page.locator("#error").isVisible(),false);
+  });
+  await test("keyboard file removal keeps focus through confirmation and deletion", async t=>{
+    const {page,a} = await journey(t);
+    const names=[1,2,3,4].map(i=>`Reference-${i}-`+"long_filename_".repeat(10)+".txt");
+    for(const name of names)await companion.addFile(a,{name,data:Buffer.from("Owned keyboard fixture").toString("base64")});
+    await page.waitForFunction(()=>current()?.files?.length===4);
+    await page.getByRole("button",{name:"Remove file "+names[3],exact:true}).focus(); await page.keyboard.press("Enter");
+    assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),"Confirm file removal "+names[3]);
+    companion.changed(); await page.keyboard.press("Enter"); await page.waitForFunction(()=>current()?.files?.length===3&&!filesBusy(active));
+    assert.equal(await page.evaluate(()=>document.activeElement.getAttribute('aria-label')),"Remove file "+names[2]);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    await page.locator("#fileContext").screenshot({path:path.join(dir,"files-keyboard.png")});
+    for(let left=2;left>=0;left--){await page.keyboard.press("Enter");await page.keyboard.press("Enter");await page.waitForFunction(n=>current()?.files?.length===n&&!filesBusy(active),left)}
+    assert.equal(await page.evaluate(()=>document.activeElement.id),"attachFiles");
+  });
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({ok:true,browserPicker:true,paste:true,drop:true,reload:true,nativeEpoch:true,conversationBinding:true,screenshots:dir}));
 } finally { await browser.close(); companion.close(); pointers.shutdown(); web.server.closeAllConnections(); await new Promise(r=>web.server.close(r)); }
