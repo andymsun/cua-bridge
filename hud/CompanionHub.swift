@@ -89,7 +89,7 @@ struct CompanionHubState: Equatable {
         connected = Self.flag(payload["connected"])
         sessions = Self.rows(payload["sessions"], limit: 32).map { id, row in
             Session(id: id, name: Self.label(row["name"], fallback: "Companion"),
-                status: Self.status(row["status"], allowed: ["idle", "thinking", "done", "stopped", "error"]),
+                status: Self.status(row["status"], allowed: ["idle", "thinking", "paused", "done", "stopped", "error"]),
                 needsApproval: Self.flag(row["needsApproval"]))
         }
         let selected = Self.identifier(payload["activeSessionID"])
@@ -116,6 +116,7 @@ struct CompanionHubState: Equatable {
         let working = sessions.filter { $0.status == "thinking" }.count
         if working > 0 { return "Andy · \(working) working" }
         if clients.contains(where: { $0.status == "busy" }) { return "Andy · CUA active" }
+        if sessions.contains(where: { $0.status == "paused" }) { return "Andy · Guide paused" }
         return "Andy · Ready"
     }
 
@@ -123,6 +124,7 @@ struct CompanionHubState: Equatable {
         switch status {
         case "idle": return "Idle"
         case "thinking": return "Thinking"
+        case "paused": return "Paused"
         case "done": return "Done"
         case "stopped": return "Stopped"
         case "busy": return "Busy"

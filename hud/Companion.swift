@@ -143,6 +143,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         composer.onStop = { [weak self] in self?.nativeCall("baristaNativeStop", $0) }
         composer.onClear = { [weak self] in self?.nativeCall("baristaNativeClear", $0) }
+        composer.onResume = { [weak self] in self?.nativeCall("baristaNativeContinue", $0) }
         composer.onAdvanced = { [weak self] in self?.nativeCall("baristaNativeAdvanced", $0) }
         composer.onDismiss = { [weak self] in self?.dismiss() }
         composer.onDictation = { [weak self] in

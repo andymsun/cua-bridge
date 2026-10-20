@@ -107,6 +107,9 @@ import AppKit
         check(large.sessions.count <= 32 && large.clients.count <= 32 && large.providers.count <= 16, "all row collections are bounded")
         check(large.sessions.allSatisfy { $0.name.count <= 80 }, "labels have a finite display bound")
         check(CompanionHubState([:]).sessions.isEmpty, "absent optional hub metadata works")
+        let paused = CompanionHubState(["connected": true, "sessions": [["id": "guide", "name": "Lesson", "status": "paused"]]])
+        check(paused.sessions.first?.detail == "Paused" && paused.sessions.first?.canStop == false, "manual pauses have a distinct non-busy state")
+        check(paused.summary == "Andy · Guide paused", "the collapsed hub does not call an unfinished guide Ready")
         for count in [17, 32, 33] {
             let row = client().merging(["host": ["ancestors": Array(1000..<(1000 + count)), "bundleId": "com.apple.Terminal"]]) { _, next in next }
             let state = CompanionHubState(["hub": ["clients": [row]]])

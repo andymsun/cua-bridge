@@ -15,6 +15,7 @@ syncBuiltinESMExports();
 const { Companion } = await import("../server/lib/companion.mjs");
 const { Pointers } = await import("../server/lib/pointer.mjs");
 const { saveConfig } = await import("../server/lib/config.mjs");
+const { App } = await import("../server/lib/native.mjs");
 const context = { pid: 412, process: "412:1792440000.125", windowId: 91, app: "Notes", bundleId: "test.notes", cursorOrigin: { x: -900.5, y: 42.25 } };
 const matched = { status: "matched", name: "Save", role: "button", windowId: 91, target: { windowId: 91, rect: { x: 0.2, y: 0.4, w: 0.2, h: 0.1 } } };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -279,7 +280,9 @@ test("late rejection and removed sessions are ignored without unhandled rejectio
 });
 
 test("stop during a guide wait's final sleep still rejects the expired turn", async () => {
-  const f = setup({ app: async () => ({ name: "Notes", read: async () => "Still waiting" }) });
+  const client = { hooks: {}, req: async command => command === "windows" ? [{ windowId: 91, title: "Notes fixture" }]
+    : command === "snapshot" ? { generation: "wait-snapshot", windowId: 91, title: "Notes fixture", entries: [{ text: 'text "Still waiting"', indent: 0, ref: 0 }] } : {} };
+  const f = setup({ app: async () => new App(client, { pid: 412, process: context.process, name: "Notes", bundleId: "test.notes" }) });
   mock.timers.enable({ apis: ["setTimeout", "Date"] });
   try {
     const key = f.session.key;

@@ -34,6 +34,16 @@ The app starts the local daemon if necessary. It does not restart an existing da
 
 The companion uses a restricted MCP adapter, not CUA's full JavaScript REPL. Built-in shell and file tools are disabled for companion turns. The normal CUA MCP API remains available to your existing harnesses under their own permission rules.
 
+## Continue a guide
+
+A manual step can take longer than the 30-second app check. The conversation then shows **Paused**, not Done. The compact native popup shows **Continue guide** instead of Clear marks. The browser shows Continue beside the pending step.
+
+**Continue guide** keeps your draft. It starts a new Guide turn with the conversation's next-turn model. It resolves the app and window again before the model starts. If the window is missing or ambiguous, choose its current window and use Continue again. Old process IDs, window IDs, element references, and approvals never authorize a resumed step.
+
+You can ask questions while a guide is paused. **Stop** cancels active work but keeps the saved step. **··· → End guide** clears the step and its marks without deleting messages or your draft. A submitted Act task also ends the manual guide. New conversations have separate guide state.
+
+App restarts restore the saved step but do not read apps, start a model, or send input. Continue is always explicit. A provider error stays visible as an error, with the step available for a deliberate retry.
+
 ## Fast cursor requests
 
 Exact-label requests use local Accessibility lookup instead of a model. For example:
@@ -200,6 +210,7 @@ build/geometry-check
 node scripts/test-spatial.mjs
 node scripts/test-companion-local.mjs
 node scripts/test-companion-model.mjs
+node scripts/test-companion-guide.mjs
 node scripts/test-native-lookup.mjs
 node scripts/test-agent-hub.mjs
 node scripts/test-hub-protocol.mjs

@@ -15,6 +15,7 @@ a{color:var(--accent);text-underline-offset:2px}a:focus-visible{outline:2px soli
 <div id="status" role="status" aria-live="polite">Connecting…</div><div id="error" role="alert" hidden></div>
 <section id="approval" hidden><strong>Approve one action</strong><p id="approvalText"></p><button id="approve" class="approve">Approve</button><button id="decline">Decline</button></section>
 <div id="answer" aria-label="Latest reply" hidden></div>
+<section id="guide" class="drawer" aria-label="Paused guide" hidden><p id="guideText"></p><div id="guideWindowRow" class="row" hidden><label for="guideWindow">Guide window</label><select id="guideWindow"></select></div><div class="row"><button id="continueGuide" class="approve">Continue guide</button><button id="endGuide">End guide</button></div></section>
 <section id="drawer" class="drawer" hidden><div class="row"><label for="sessionChoice">Conversation</label><select id="sessionChoice" aria-label="Conversation"></select><button id="new">New</button></div><div class="row"><label for="mode">Mode</label><select id="mode"><option value="guide">Guide: I point, you act</option><option value="act">Act: approve each action</option></select></div><div class="row"><label for="model">Model for next turn</label><select id="model" aria-describedby="modelStatus"></select></div><p id="modelStatus" role="status"></p><p id="modelRun"></p><details><summary>Model choices and usage</summary><p><strong>GPT-6 Astra</strong>: the default here. OpenAI describes it as its highest-capability model for demanding work.</p><p><strong>GPT-5.6 Sol</strong>: an alternative for complex work with lower published API rates. A lower price does not mean a faster response.</p><p>Both have a published 1,050,000-token context limit. Barista sends a bounded conversation, not the whole desktop.</p><p>Standard API rates per million tokens, checked 20 October 2026: Astra $10 input / $50 output; Sol $4 input / $20 output. These are not Codex subscription charges. Cache, long-context, and service-tier rates differ.</p><p>Your signed-in backend controls access, usage, and charges. This control does not enable Fast mode or change provider settings. No automatic model fallback.</p><p>Exact cursor requests use local Accessibility lookup without a model. Conversation names do not change the model.</p><p>Sources: <a data-model-doc="codex/gpt-6-astra" href="https://developers.openai.com/api/docs/models/gpt-6-astra" target="_blank" rel="noopener noreferrer">Astra specifications</a> · <a data-model-doc="codex/gpt-5.6-sol" href="https://developers.openai.com/api/docs/models/gpt-5.6-sol" target="_blank" rel="noopener noreferrer">Sol specifications</a></p></details><div class="row"><button id="showHistory">Show history</button><button id="readAloud">Read reply aloud</button><button id="remove" class="danger">Remove</button></div><div id="history" hidden></div><p id="backend"></p><p id="timing"></p><p>Tap ⌃⌥Space to toggle. Hold it to talk. Escape dismisses; it does not stop an agent turn.</p><p id="voiceInfo">Voice uses on-device recognition and an installed system voice. New speech interrupts playback.</p><p>Questions and requested app text go to your assistant provider. Drawing and the demo are local. No automatic screenshots.</p><div class="row"><button id="checkAccess">Check app access</button><button id="enableAccess">Enable app access…</button></div><p id="nativeStatus"></p><details><summary>Place an area by coordinates</summary><div class="coordinates"><label>X<input id="areaX" type="number" value="100"></label><label>Y<input id="areaY" type="number" value="100"></label><label>Width<input id="areaW" type="number" min="1" value="300"></label><label>Height<input id="areaH" type="number" min="1" value="180"></label></div><button id="placeArea">Show area</button></details></section>
 </div><script>
 const token='{{TOKEN}}',$=id=>document.getElementById(id),native=!!window.webkit?.messageHandlers?.barista;
@@ -28,7 +29,7 @@ document.body.dataset.native=String(native);
 if(native)for(const link of document.querySelectorAll('[data-model-doc]'))link.onclick=e=>{e.preventDefault();bridge({action:'modelDocs',model:link.dataset.modelDoc})};
 function renderHistory(){$('history').textContent=(current()?.messages||[]).map(m=>(m.role==='user'?'You':'Andy')+': '+m.text).join('\n\n')}
 function bridge(message){if(!native)throw new Error('Open the native Andy app for desktop gestures, the pointer demo, and voice. Coordinate tools remain available here.');window.webkit.messageHandlers.barista.postMessage(message)}
-function expanded(){document.body.dataset.expanded=String(advanced||!!current()?.approval||!$('error').hidden||!$('answer').hidden)}
+function expanded(){document.body.dataset.expanded=String(advanced||!!current()?.approval||!$('error').hidden||!$('answer').hidden||!$('guide').hidden)}
 function error(message){uiError=bounded(message,4000);$('error').textContent=uiError;$('error').hidden=!uiError;expanded();publishNative()}
 async function api(route,data={}){const r=await fetch('/api/companion'+route,{method:'POST',headers:{'content-type':'application/json','x-cua-token':token},body:JSON.stringify(data)});const result=await r.json();if(!r.ok)throw new Error(result.error||'Request failed. Try again.');return result}
 function act(task){return Promise.resolve().then(task).catch(e=>{error(e.message);return false})}
@@ -66,13 +67,40 @@ async function chooseModel(id,model){
  changingModels.add(id);paint();
  try{render(await api('/model',{id,model}));return true}finally{changingModels.delete(id);paint()}
 }
+function paintGuide(s,busy){
+ const step=s?.guide,choices=s?.guideWindows,picker=$('guideWindow');
+ $('guide').hidden=!step||!!busy||(native&&!advanced&&!choices);
+ $('guideText').textContent=step?(step.label?step.label+' · ':'')+'Expected: '+step.contains:'';
+ $('continueGuide').disabled=!online||!!busy||changingModels.has(active);$('endGuide').disabled=!online||!!busy;
+ $('guideWindowRow').hidden=!choices;picker.disabled=!online||!!busy;
+ const signature=JSON.stringify([s?.id,step?.id,choices]);
+ if(picker.dataset.signature!==signature){
+  picker.replaceChildren(new Option('Choose a current window',''));
+  for(const w of choices?.windows||[])picker.add(new Option((w.title||'Untitled')+' · '+w.windowId,String(w.windowId)));
+  picker.dataset.signature=signature;
+ }
+}
+async function guideAction(id,guideId,end=false){
+ const s=current();
+ if(!online||!s||s.id!==id||!s.guide||s.guide.id!==guideId||s.status==='thinking'||sending.has(id))return false;
+ if(changingModels.has(id))throw new Error('Wait for the model choice to save, then continue.');
+ const choice=$('guideWindow').value,windows=s.guideWindows;
+ const context=choice&&windows?{pid:windows.pid,process:windows.process,app:windows.app,windowId:Number(choice)}:appContext?structuredClone(appContext):null;
+ cancelCapture();voiceReply=null;if(native)bridge({action:'silence'});
+ sending.add(id);uiError='';paint();
+ try{render(await api(end?'/end-guide':'/continue',{id,guideId,...(end?{}:{context})}));return true}
+ finally{sending.delete(id);paint()}
+}
+window.baristaNativeContinue=payload=>act(()=>guideAction(payload?.id,payload?.guideId));
+$('continueGuide').onclick=()=>{const s=current();return act(()=>guideAction(s?.id,s?.guide?.id))};
+$('endGuide').onclick=()=>{const s=current();return act(()=>guideAction(s?.id,s?.guide?.id,true))};
 function publishNative(){
  if(!native)return;
  const s=current(),d=draft(),sessions=sessionMetadata();
  const hub={action:'hubState',connected:online,activeSessionID:active,sessions};
  const metadata=hubMetadata(state.hub);if(metadata)hub.hub=metadata;
  const signature=JSON.stringify(hub);if(signature!==lastHub){lastHub=signature;bridge(hub)}
- bridge({action:'composerState',connected:online,activeSessionID:active,sessions,draft:d.text,generation:d.generation,edit:d.edit,status:s?.status||'idle',sending:sending.has(active),mode,route:s?.route||null,presentation:s?.presentation||null,notice:bounded(s?.error||state.error||uiError||(s?.presentation==='prompt'?latestAnswer():''),4000),needsApproval:!!s?.approval,hasMarks:s?.hasMarks===true,advanced,voicePhase,voiceStatus});
+ bridge({action:'composerState',connected:online,activeSessionID:active,sessions,draft:d.text,generation:d.generation,edit:d.edit,status:s?.status||'idle',sending:sending.has(active),mode,route:s?.route||null,presentation:s?.presentation||null,notice:bounded(s?.error||state.error||uiError||(s?.presentation==='prompt'?latestAnswer():''),4000),needsApproval:!!s?.approval,hasMarks:s?.hasMarks===true,guideID:s?.guide?.id||null,advanced,voicePhase,voiceStatus});
 }
 function cancelCapture(notify=true){
  const capture=voiceCapture;voiceCapture=null;talking=false;voicePhase='idle';voiceStatus='';document.body.dataset.listening='false';
@@ -132,7 +160,7 @@ function render(next){
 }
 function paint(){
  const s=current(),busy=s?.status==='thinking'||sending.has(active),approval=s?.approval,answer=latestAnswer();
- $('send').disabled=!online||busy||changingModels.has(active);$('send').hidden=!!busy;$('stop').hidden=!busy;$('mode').disabled=!!busy;paintModels(s);
+ $('send').disabled=!online||busy||changingModels.has(active);$('send').hidden=!!busy;$('stop').hidden=!busy;$('mode').disabled=!!busy;paintModels(s);paintGuide(s,busy);
  const signature=state.sessions.map(s=>s.id+':'+s.name).join('|');
  if($('sessionChoice').dataset.signature!==signature){$('sessionChoice').replaceChildren();for(const session of state.sessions){const o=document.createElement('option');o.value=session.id;o.textContent=session.name;$('sessionChoice').append(o)}$('sessionChoice').dataset.signature=signature}
  $('sessionChoice').value=active||'';
@@ -143,7 +171,7 @@ function paint(){
  const essential=s?.presentation==='prompt';
  $('answer').hidden=!answer||answer===s?.error||(!essential&&(!showAnswer||s?.presentation==='cursor'||(native&&!advanced)));
  if(!$('history').hidden)renderHistory();
- $('status').textContent=voiceStatus||(!online?'Reconnecting to local CUA…':state.demoActive?'Local demo · no mouse input sent':approval?'Waiting for your approval':busy?(s.timings?.firstEventMs!=null?'Andy is working…':'Starting Andy…'):'');
+ $('status').textContent=voiceStatus||(!online?'Reconnecting to local CUA…':state.demoActive?'Local demo · no mouse input sent':approval?'Waiting for your approval':busy?(s.timings?.firstEventMs!=null?'Andy is working…':'Starting Andy…'):s?.status==='paused'?'Guide paused · Continue when ready':s?.status==='stopped'?'Stopped':'');
  $('status').classList.toggle('busy',!!busy);$('demo').textContent=state.demoActive?'Stop demo':'Pointer demo';
  const message=s?.error||state.error||uiError;$('error').textContent=message||'';$('error').hidden=!message;
  $('area').hidden=!s?.area;if(s?.area)$('areaText').textContent=`Area · ${Math.round(s.area.w)} × ${Math.round(s.area.h)} pt`;

@@ -65,6 +65,9 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     let stop = NSButton(title: "Stop", target: nil, action: nil)
     let dictate = NSButton(title: "Dictate", target: nil, action: nil)
     let clearMarks = NSButton(title: "Clear marks", target: nil, action: nil)
+    let resume = NSButton(title: "Continue guide", target: nil, action: nil)
+    private var guideID: String?
+    var onResume: (([String: Any]) -> Void)?
     let advanced = NSButton(title: "Controls & history", target: nil, action: nil)
     let status = NSTextField(wrappingLabelWithString: "Connecting…")
     private let context = NSTextField(labelWithString: "Your screen companion")
@@ -148,7 +151,10 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         clearMarks.target = self; clearMarks.action = #selector(clearVisuals); clearMarks.isHidden = true
         clearMarks.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
         clearMarks.setAccessibilityLabel("Clear marks"); clearMarks.toolTip = "Clear this conversation’s desktop marks"
-        for button in [clearMarks, dictate, send, stop] {
+        resume.target = self; resume.action = #selector(resumeGuide); resume.isHidden = true
+        resume.image = NSImage(systemSymbolName: "play.circle", accessibilityDescription: nil)
+        resume.setAccessibilityLabel("Continue guide"); resume.toolTip = "Continue the paused guide; keep your draft"
+        for button in [clearMarks, resume, dictate, send, stop] {
             button.imagePosition = .imageOnly
             if button !== send { button.isBordered = false }
             button.widthAnchor.constraint(equalToConstant: 28).isActive = true
@@ -157,7 +163,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         status.font = .systemFont(ofSize: 11); status.textColor = muted; status.maximumNumberOfLines = 2
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         status.setContentHuggingPriority(NSLayoutConstraint.Priority(249), for: .horizontal)
-        let controls = NSStackView(views: [sessions, status, clearMarks, dictate, send, stop])
+        let controls = NSStackView(views: [sessions, status, clearMarks, resume, dictate, send, stop])
         controls.spacing = 5; controls.distribution = .fill; controls.alignment = .centerY
         let stack = NSStackView(views: [header, scroll, controls])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 5
@@ -192,6 +198,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     @objc private func dismiss() { guard !editor.hasMarkedText() else { return }; onDismiss?() }
     @objc private func stopSession() { if let id = activeSessionID { onStop?(["id": id]) } }
     @objc private func clearVisuals() { if clearMarks.isEnabled, let id = activeSessionID { onClear?(["id": id]) } }
+    @objc private func resumeGuide() { if resume.isEnabled, let id = activeSessionID, let step = guideID { onResume?(["id": id, "guideId": step]) } }
     @objc private func dictation() { onDictation?() }
     @objc private func toggleAdvanced() { onAdvanced?(["visible": !advancedVisible]) }
     @objc private func sessionChosen() { selectSession(id: sessions.selectedItem?.representedObject as? String) }
@@ -252,7 +259,9 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         let busy = payload["status"] as? String == "thinking" || payload["sending"] as? Bool == true
         editor.isEditable = true; send.isEnabled = connected && !busy
         send.isHidden = busy; stop.isHidden = !busy; stop.isEnabled = connected
-        clearMarks.isHidden = payload["hasMarks"] as? Bool != true || busy; clearMarks.isEnabled = connected && !busy
+        guideID = (payload["guideID"] as? String).flatMap { !$0.isEmpty && $0.utf16.count <= 128 ? $0 : nil }
+        resume.isHidden = guideID == nil || busy; resume.isEnabled = connected && !busy && guideID != nil
+        clearMarks.isHidden = payload["hasMarks"] as? Bool != true || busy || guideID != nil; clearMarks.isEnabled = connected && !busy && guideID == nil
         dictate.isEnabled = connected
         let voicePhase = payload["voicePhase"] as? String ?? "idle"
         let capturing = ["permission", "listening", "finishing"].contains(voicePhase)
@@ -270,7 +279,15 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         else if let voiceStatus = payload["voiceStatus"] as? String, !voiceStatus.isEmpty { status.stringValue = voiceStatus }
         else if payload["needsApproval"] as? Bool == true { status.stringValue = "Review approval below" }
         else if let notice = payload["notice"] as? String, !notice.isEmpty { status.stringValue = "Needs your attention below" }
-        else { status.stringValue = busy ? "Working…" : payload["status"] as? String == "done" ? "Done" : "" }
+        else if busy { status.stringValue = "Working…" }
+        else {
+            switch payload["status"] as? String {
+            case "paused": status.stringValue = "Paused"
+            case "stopped": status.stringValue = "Stopped"
+            case "done": status.stringValue = "Done"
+            default: status.stringValue = ""
+            }
+        }
         status.toolTip = status.stringValue
     }
 }

@@ -199,6 +199,42 @@ try{
   const capture=await baristaNativeVoicePrepare({id:active,captureID:'dismissed',route:'dictation'});baristaDismissed();await baristaVoiceFinal({captureID:capture.captureID,text:'late after Escape'});
  });
  assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','dismissal rejects late speech and preserves draft');
+ const {NativeClient}=await import('../server/lib/native.mjs');
+ const guideNative=new NativeClient();
+ guideNative.req=async(command)=>{
+  if(command==='apps')return [{pid:4242,process:'4242:1',name:'Study Fixture',bundleId:'local.cua.StudyFixture'}];
+  if(command==='windows')return [{windowId:51,title:'Lesson'},{windowId:52,title:'Lesson'}];
+  throw new Error('Unexpected guide native call: '+command);
+ };
+ companion.native=guideNative;
+ const guideSession=companion.create({name:'Guide UI'}),guideId='ui-step';
+ guideSession.guide={id:guideId,app:{name:'Study Fixture',bundleId:'local.cua.StudyFixture'},windowTitle:'Lesson',contains:'Exercise complete',label:'Complete the exercise'};
+ guideSession.status='paused';companion.changed();
+ await page.waitForFunction(id=>state.sessions.some(s=>s.id===id),guideSession.id);
+ await page.evaluate(id=>{chooseSession(id);setDraft('Keep my lesson question')},guideSession.id);
+ assert.equal(await page.locator('#guide').isVisible(),true,'a manual pause has an explicit continuation surface');
+ await page.getByRole('button',{name:'Continue guide',exact:true}).click();
+ await page.waitForFunction(()=>current()?.status==='error'&&current().guideWindows);
+ await page.getByLabel('Guide window',{exact:true}).selectOption('52');
+ await page.getByRole('button',{name:'Continue guide',exact:true}).click();
+ await page.waitForFunction(()=>current()?.status==='paused');
+ assert.equal(await page.locator('#prompt').inputValue(),'Keep my lesson question','Continue does not submit or erase the draft');
+ await voicePage.evaluate(id=>{chooseSession(id);setDraft('Keep my native question');appContext={pid:4242,process:'4242:1',windowId:52,app:'Study Fixture'}},guideSession.id);
+ assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='composerState').at(-1).guideID),guideId);
+ assert.equal(await voicePage.evaluate(({id})=>baristaNativeContinue({id,guideId:'stale'}),{id:guideSession.id}),false,'stale native controls do not start a new step');
+ await voicePage.route('**/api/companion/continue',async route=>{
+  const response=await route.fetch();await voicePage.evaluate(id=>chooseSession(id),b);await route.fulfill({response});
+ });
+ assert.equal(await voicePage.evaluate(({id,guideId})=>baristaNativeContinue({id,guideId}),{id:guideSession.id,guideId}),true);
+ assert.equal(await voicePage.evaluate(()=>active),b,'a late Continue response cannot change the selected conversation');
+ assert.equal(await voicePage.evaluate(id=>draft(id).text,guideSession.id),'Keep my native question');
+ await voicePage.unroute('**/api/companion/continue');
+ await page.waitForFunction(()=>current()?.status==='paused');
+ const guideMessages=structuredClone(guideSession.messages);
+ await page.getByRole('button',{name:'End guide',exact:true}).click();
+ await page.waitForFunction(()=>!current()?.guide);
+ assert.deepEqual(guideSession.messages,guideMessages);assert.equal(await page.locator('#prompt').inputValue(),'Keep my lesson question');
+ await voicePage.evaluate(id=>chooseSession(id),a);
  await voicePage.evaluate(()=>{
   events.close();window.nativeMessages=[];voiceReply=active;spoken='';
   const next={...state,sessions:[{id:active,name:'Voice fixture',status:'thinking',messages:[{role:'assistant',text:'One sentence. ' }]}]};

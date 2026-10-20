@@ -78,6 +78,22 @@ import AppKit
         precondition(composer.clearMarks.isHidden && cleared == nil, "a busy turn uses Stop instead of clearing a changing target")
         composer.apply(state("keep draft", edit: 3000, id: "b").merging(["hasMarks": false]) { _, new in new })
         precondition(composer.clearMarks.isHidden, "empty conversations do not show an inactive clear control")
+        var resumed: [String: Any]?
+        composer.onResume = { resumed = $0 }
+        let paused = state("keep draft", edit: 3000, id: "b").merging(["guideID": "step-b", "status": "paused", "hasMarks": true]) { _, new in new }
+        composer.apply(paused)
+        precondition(!composer.resume.isHidden && composer.resume.isEnabled && composer.clearMarks.isHidden, "a paused guide replaces Clear marks with Continue in the same footer")
+        composer.resume.performClick(nil)
+        precondition(resumed?["id"] as? String == "b" && resumed?["guideId"] as? String == "step-b" && editor.string == "keep draft", "Continue binds the step and leaves the draft intact")
+        precondition(composer.status.stringValue.contains("Paused"), "paused work is not labeled Done")
+        resumed = nil
+        composer.apply(paused.merging(["status": "thinking"]) { _, new in new })
+        composer.resume.performClick(nil)
+        precondition(composer.resume.isHidden && resumed == nil, "a busy guide cannot submit another Continue")
+        composer.apply(paused.merging(["connected": false]) { _, new in new })
+        precondition(!composer.resume.isEnabled, "Continue needs a connected transport")
+        composer.apply(paused.merging(["status": "stopped"]) { _, new in new })
+        precondition(composer.status.stringValue.contains("Stopped") && !composer.resume.isHidden, "Stop cancels work but leaves deliberate continuation available")
         precondition(composer.window == nil, "checks never order a window or send global input")
         print("PASS native editor Enter/Shift-Enter/Escape, real IME, draft callbacks, and stale-ack protection")
     }
