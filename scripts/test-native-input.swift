@@ -317,7 +317,7 @@ check("buttons", "event construction failure posts no movement or partial click"
 }
 check("buttons", "uncertain press, open, and menu results never send a second action") {
     for (action, button, count) in [("AXPress", "left", 1), ("AXOpen", "left", 2), ("AXShowMenu", "right", 1)] {
-        for error in [AXError.cannotComplete, .failure, .apiDisabled, .invalidUIElement] {
+        for error in [AXError.cannotComplete, .failure, .apiDisabled, .invalidUIElement, .attributeUnsupported] {
             let f = fixture(); f.target.actions = [action]; f.target.actionErrors[action] = error; f.target.effectActions = [action]
             var failure: AgentError?
             do { _ = try handle(f.request(button: button, count: count)) } catch let e as AgentError { failure = e }

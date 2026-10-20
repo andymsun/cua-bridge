@@ -60,7 +60,9 @@ Fallback also needs a definite unsupported Accessibility result. An uncertain
 press, open, menu, or selection result returns `action_outcome_unknown`, with the
 AX error code. CUA sends no later AX action or mouse event for that request.
 Selection support must be readable before CUA tries that write. An unsupported
-AXPress is not tried twice. Check the app before you repeat an uncertain action.
+AXPress is not tried twice. This stops CUA's fallback, not effects inside an
+Accessibility action. An AX error does not prove that the app did nothing.
+Check the app before you repeat an uncertain action.
 
 Mouse, drag, and coordinate-scroll events carry both the selected window ID and
 its window-local point. The public `NSEvent` constructor supplies the window ID.
