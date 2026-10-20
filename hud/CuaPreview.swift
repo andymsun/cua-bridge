@@ -173,9 +173,13 @@ struct Spring {
     init(_ x: CGFloat, _ response: CGFloat, _ damping: CGFloat) { value = x; target = x; self.response = response; self.damping = damping }
     mutating func snap(_ x: CGFloat) { value = x; target = x; v = 0 }
     mutating func step(_ dt: CGFloat) {
+        guard dt.isFinite, dt > 0 else { return }
         let k = pow(2 * .pi / max(0.001, response), 2), c = 4 * .pi * damping / max(0.001, response)
-        var t: CGFloat = 0
-        while t < dt { v += (k * (target - value) - c * v) / 240; value += v / 240; t += 1 / 240 }
+        var remaining = min(dt, 1 / 20)
+        while remaining > 0 {
+            let step = min(remaining, 1 / 240)
+            v += (k * (target - value) - c * v) * step; value += v * step; remaining -= step
+        }
         if abs(target - value) < 0.01 && abs(v) < 0.05 { value = target; v = 0 }
     }
     var settled: Bool { value == target && v == 0 }
@@ -745,8 +749,8 @@ final class PointerMark {
             let layer = annotationLayers[id] ?? { let layer = CAShapeLayer(); canvas?.layer?.insertSublayer(layer, at: 1); annotationLayers[id] = layer; return layer }()
             CATransaction.begin(); CATransaction.setDisableActions(true)
             let path = CGMutablePath(); path.move(to:first); points.dropFirst().forEach { path.addLine(to:$0) }
-            layer.path = path; layer.fillColor = nil; layer.strokeColor = color.cgColor; layer.lineCap = .round; layer.lineJoin = .round
-            layer.lineWidth = kind == "highlight" ? max(4,rect?.height ?? 20) : 3
+            layer.path = path; layer.fillColor = nil; layer.strokeColor = color.cgColor; layer.lineCap = kind == "highlight" && rect != nil ? .butt : .round; layer.lineJoin = .round
+            layer.lineWidth = PointerGeometry.strokeWidth(kind:kind,rect:rect)
             layer.opacity = kind == "highlight" ? 0.28 : 0.95
             CATransaction.commit()
             if motion == id && lastMotion != id {

@@ -12,6 +12,27 @@ final class MotionChecks: NSObject, NSApplicationDelegate {
         if !condition { overlay.windows.forEach { $0.window.close() }; fputs("FAIL \(message)\n", stderr); exit(1) }
     }
     @MainActor func check() async {
+        let hz60:CGFloat=1/60, hz120:CGFloat=1/120, remainder:CGFloat=1/150
+        let partitions:[[CGFloat]]=[Array(repeating:0.001,count:40),[0.04],[0.007,0.013,0.003,0.017],[hz60,hz60,remainder],[hz120,hz120,hz120,hz120,remainder]]
+        for steps in partitions {
+            var spring = Spring(0, 0.3, 0.9); spring.target = 1
+            for dt in steps { spring.step(dt) }
+            require(abs(spring.value-0.213624598)<0.03 && abs(spring.v-8.072935403)<0.6, "spring integrates 40 ms rather than rounding every frame up: value=\(spring.value), velocity=\(spring.v)")
+        }
+        var guarded = Spring(0, 0.3, 0.9); guarded.target = 1
+        for dt: CGFloat in [0, -1, .nan, .infinity] { guarded.step(dt) }
+        require(guarded.value==0 && guarded.v==0, "invalid frame intervals leave the spring unchanged")
+        var bounded=guarded; guarded.step(1000); bounded.step(0.05)
+        require(guarded.value==bounded.value && guarded.v==bounded.v, "a long pause keeps the bounded frame-time cap")
+        let canvas=FlippedView(frame:CGRect(x:0,y:0,width:400,height:400))
+        let preview=PointerMark(in:canvas,color:.systemOrange,scale:1)
+        for rect in [CGRect(x:20,y:30,width:24,height:240),CGRect(x:20,y:30,width:200,height:20),CGRect(x:20,y:30,width:30,height:30),CGRect(x:20,y:30,width:0.5,height:1.5)] {
+            preview.annotations([["id":"highlight","kind":"highlight","target":["screenRect":["x":rect.minX,"y":rect.minY,"w":rect.width,"h":rect.height]]]],motion:nil,local:{$0},resolve:{_ in (CGPoint(x:rect.midX,y:rect.midY),rect)})
+            let layer=preview.annotationLayers["highlight"]!
+            let ink=layer.path!.copy(strokingWithWidth:layer.lineWidth,lineCap:layer.lineCap == .butt ? .butt : .round,lineJoin:.round,miterLimit:10).boundingBoxOfPath
+            require(ink==rect,"rendered highlight covers its rectangle without overflow: \(ink) vs \(rect)")
+        }
+        preview.remove()
         let realMouse = NSEvent.mouseLocation
         let primary=NSScreen.screens.first!.frame
         let initialMouse=CGPoint(x:primary.minX+primary.width*0.45,y:primary.maxY-primary.height*0.35)

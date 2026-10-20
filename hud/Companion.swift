@@ -48,7 +48,7 @@ final class AreaSelectionView: NSView {
         let local=points.map{CGPoint(x:$0.x-screen.minX,y:$0.y-screen.minY)}
         let line=PointerGeometry.stroke(kind:mode,rect:rect,points:mode == "arrow" ? [CGPoint(x:a.x-screen.minX,y:a.y-screen.minY),CGPoint(x:b.x-screen.minX,y:b.y-screen.minY)] : local)
         guard let first=line.first else{return};let path=NSBezierPath();path.move(to:first);line.dropFirst().forEach{path.line(to:$0)}
-        path.lineWidth=mode == "highlight" ? max(12,rect.height) : 3;path.lineCapStyle = .round;path.lineJoinStyle = .round
+        path.lineWidth=PointerGeometry.strokeWidth(kind:mode,rect:rect);path.lineCapStyle = mode == "highlight" ? .butt : .round;path.lineJoinStyle = .round
         (mode == "highlight" ? color.withAlphaComponent(0.3) : color).setStroke();path.stroke()
     }
     override func mouseDown(with event:NSEvent){start=NSEvent.mouseLocation;end=start;points=[start!];update?(start!,end!,points)}

@@ -29,6 +29,15 @@ import CoreGraphics
         precondition(trace == CGPoint(x: 100,y: 50), "stroke motion uses distance, not point count")
         let circle = PointerGeometry.stroke(kind: "circle", rect: CGRect(x: 20,y: 30,width: 100,height: 80), points: [])
         precondition(circle.count > 30 && hypot(circle.first!.x-circle.last!.x,circle.first!.y-circle.last!.y)<0.01)
+        for (region, expected) in [
+            (CGRect(x: -1400, y: 90, width: 24, height: 240), [CGPoint(x: -1388, y: 90), CGPoint(x: -1388, y: 330)]),
+            (CGRect(x: 10, y: 30, width: 200, height: 20), [CGPoint(x: 10, y: 40), CGPoint(x: 210, y: 40)]),
+            (CGRect(x: 40, y: 5, width: 30, height: 30), [CGPoint(x: 40, y: 20), CGPoint(x: 70, y: 20)]),
+            (CGRect(x: 2, y: 3, width: 0.5, height: 1.5), [CGPoint(x: 2.25, y: 3), CGPoint(x: 2.25, y: 4.5)])
+        ] {
+            precondition(PointerGeometry.stroke(kind: "highlight", rect: region, points: []) == expected, "highlight sweep follows the full long axis, including tall and square areas")
+        }
+        precondition(PointerGeometry.stroke(kind: "highlight", rect: CGRect(x: 0, y: 0, width: 0, height: 20), points: []).isEmpty, "a zero-area drag does not make a highlight")
         for mouse in [CGPoint(x:left.minX+2,y:left.minY+2),CGPoint(x:left.maxX-2,y:left.maxY-2)] {
             let companion=PointerGeometry.companion(at:mouse,bounds:left)
             precondition(left.insetBy(dx:24,dy:24).contains(companion),"idle companion stays inside negative-origin screen edges")

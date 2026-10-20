@@ -50,13 +50,22 @@ enum PointerGeometry {
     static func stroke(kind: String, rect: CGRect?, points: [CGPoint]) -> [CGPoint] {
         if let r = rect {
             if kind == "circle" { return (0...64).map { i in let a = CGFloat(i)/64 * 2 * .pi - .pi/2; return CGPoint(x: r.midX+cos(a)*r.width/2, y: r.midY+sin(a)*r.height/2) } }
-            if kind == "highlight" { let inset = min(r.width/2, r.height/2); return [CGPoint(x:r.minX+inset,y:r.midY), CGPoint(x:r.maxX-inset,y:r.midY)] }
+            if kind == "highlight" {
+                guard r.width > 0, r.height > 0 else { return [] }
+                return r.height > r.width
+                    ? [CGPoint(x:r.midX,y:r.minY), CGPoint(x:r.midX,y:r.maxY)]
+                    : [CGPoint(x:r.minX,y:r.midY), CGPoint(x:r.maxX,y:r.midY)]
+            }
         }
         if kind == "arrow", let a = points.first, let b = points.last {
             let angle = atan2(b.y-a.y,b.x-a.x), size = min(16, hypot(b.x-a.x,b.y-a.y)/3)
             return [a,b,CGPoint(x:b.x-cos(angle-0.5)*size,y:b.y-sin(angle-0.5)*size),b,CGPoint(x:b.x-cos(angle+0.5)*size,y:b.y-sin(angle+0.5)*size)]
         }
         return points
+    }
+
+    static func strokeWidth(kind: String, rect: CGRect?) -> CGFloat {
+        kind == "highlight" ? rect.map { min($0.width, $0.height) } ?? 20 : 3
     }
 
     static func cursor(at p: CGPoint, occupied: [CGPoint], screens: [CGRect]) -> CGPoint {

@@ -54,6 +54,8 @@ Choose **Select**, then drag across the desktop. Escape cancels. The selection o
 
 Choose **Draw** for a circle, highlight, arrow, or freehand pen. Drag to define the mark. **Clear marks** removes this conversation's marks. Each cursor keeps at most twelve marks. Freehand strokes contain at most 512 points.
 
+Rectangle highlights fill the selected bounds, including narrow vertical and square areas. The preview and final mark use the same stroke geometry and width. Cursor springs use elapsed frame time, including partial integration steps, rather than rounding each timer interval upward.
+
 **Pointer demo** runs a 13-second local sequence: move, circle, highlight, arrow, freehand stroke, then a return near your mouse. Move your mouse during the final phase to see the cursor follow. It calls no model and sends no mouse input. The cursor follows the stroke as it appears. **Stop demo** removes the demo cursor without removing conversation marks. Escape also stops the local demo.
 
 The selection becomes a persistent ring. Choose **Spotlight** to dim the surrounding area. A screen shows the most recently updated spotlight when conversations select competing regions. Other rings and cursors remain visible.
