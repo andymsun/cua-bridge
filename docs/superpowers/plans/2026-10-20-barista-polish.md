@@ -33,5 +33,7 @@ Commit coherent tested batches with explicit source/test/docs paths. Exclude run
 ## Progress
 
 - Initial live diagnosis and private backup completed. The popup reopened, and stale completed marks were removed without a process restart or history change.
-- Existing cursor-first feature: checkpoint pending.
-- First implementation batch: completion feedback, mark cleanup, and display choice.
+- Existing cursor-first feature pushed as `5173d00` on `feat/andy-barista`.
+- Completion feedback: completed labels expire without removing selected areas. Reloading old output does not revive its instruction. The compact native composer exposes a per-conversation Clear marks action and keeps drafts/history intact.
+- Completion checks passed: companion state, local/model route, process lifecycle, native/web bridge, real AppKit composer, and live synthetic-pointer motion. The stale-label and missing-control checks failed before the fix. Packaged UI coverage will run with the display update.
+- Next batch: display choice, then model controls and guide continuation.

@@ -64,6 +64,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     let send = NSButton(title: "Send", target: nil, action: nil)
     let stop = NSButton(title: "Stop", target: nil, action: nil)
     let dictate = NSButton(title: "Dictate", target: nil, action: nil)
+    let clearMarks = NSButton(title: "Clear marks", target: nil, action: nil)
     let advanced = NSButton(title: "Controls & history", target: nil, action: nil)
     let status = NSTextField(wrappingLabelWithString: "Connecting…")
     private let context = NSTextField(labelWithString: "Your screen companion")
@@ -79,6 +80,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     var onSubmit: (([String: Any]) -> Void)?
     var onSession: (([String: Any]) -> Void)?
     var onStop: (([String: Any]) -> Void)?
+    var onClear: (([String: Any]) -> Void)?
     var onAdvanced: (([String: Any]) -> Void)?
     var onDictation: (() -> Void)?
     var onDismiss: (() -> Void)?
@@ -143,7 +145,10 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         dictate.target = self; dictate.action = #selector(dictation)
         dictate.image = NSImage(systemSymbolName: "mic", accessibilityDescription: nil)
         dictate.setAccessibilityLabel("Dictate into draft; never sends"); dictate.toolTip = "Dictate into draft; never sends"
-        for button in [dictate, send, stop] {
+        clearMarks.target = self; clearMarks.action = #selector(clearVisuals); clearMarks.isHidden = true
+        clearMarks.image = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil)
+        clearMarks.setAccessibilityLabel("Clear marks"); clearMarks.toolTip = "Clear this conversation’s desktop marks"
+        for button in [clearMarks, dictate, send, stop] {
             button.imagePosition = .imageOnly
             if button !== send { button.isBordered = false }
             button.widthAnchor.constraint(equalToConstant: 28).isActive = true
@@ -152,7 +157,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         status.font = .systemFont(ofSize: 11); status.textColor = muted; status.maximumNumberOfLines = 2
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         status.setContentHuggingPriority(NSLayoutConstraint.Priority(249), for: .horizontal)
-        let controls = NSStackView(views: [sessions, status, dictate, send, stop])
+        let controls = NSStackView(views: [sessions, status, clearMarks, dictate, send, stop])
         controls.spacing = 5; controls.distribution = .fill; controls.alignment = .centerY
         let stack = NSStackView(views: [header, scroll, controls])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 5
@@ -186,6 +191,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     }
     @objc private func dismiss() { guard !editor.hasMarkedText() else { return }; onDismiss?() }
     @objc private func stopSession() { if let id = activeSessionID { onStop?(["id": id]) } }
+    @objc private func clearVisuals() { if clearMarks.isEnabled, let id = activeSessionID { onClear?(["id": id]) } }
     @objc private func dictation() { onDictation?() }
     @objc private func toggleAdvanced() { onAdvanced?(["visible": !advancedVisible]) }
     @objc private func sessionChosen() { selectSession(id: sessions.selectedItem?.representedObject as? String) }
@@ -246,6 +252,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         let busy = payload["status"] as? String == "thinking" || payload["sending"] as? Bool == true
         editor.isEditable = true; send.isEnabled = connected && !busy
         send.isHidden = busy; stop.isHidden = !busy; stop.isEnabled = connected
+        clearMarks.isHidden = payload["hasMarks"] as? Bool != true || busy; clearMarks.isEnabled = connected && !busy
         dictate.isEnabled = connected
         let voicePhase = payload["voicePhase"] as? String ?? "idle"
         let capturing = ["permission", "listening", "finishing"].contains(voicePhase)
@@ -263,7 +270,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         else if let voiceStatus = payload["voiceStatus"] as? String, !voiceStatus.isEmpty { status.stringValue = voiceStatus }
         else if payload["needsApproval"] as? Bool == true { status.stringValue = "Review approval below" }
         else if let notice = payload["notice"] as? String, !notice.isEmpty { status.stringValue = "Needs your attention below" }
-        else { status.stringValue = busy ? "Working…" : "" }
+        else { status.stringValue = busy ? "Working…" : payload["status"] as? String == "done" ? "Done" : "" }
         status.toolTip = status.stringValue
     }
 }

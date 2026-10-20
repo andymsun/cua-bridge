@@ -61,6 +61,12 @@ final class MotionChecks: NSObject, NSApplicationDelegate {
         simulatedMouse=CGPoint(x:initialMouse.x+180,y:initialMouse.y+60)
         await pause(1.2)
         require(hypot(position(mark.cursor).x-firstPosition.x,position(mark.cursor).y-firstPosition.y)>100,"idle cursor adapts to mouse motion after settling")
+        overlay.tick()
+        require(mark.pill.isHidden,"completed instructions expire while the idle cursor remains")
+        overlay.document=["cursors":["fixture":["target":["screenRect":["x":100,"y":100,"w":180,"h":80]],"kind":"rect","state":"done","persistent":true,"label":"Old completed step","t":Date().timeIntervalSince1970*1000-60000]]]
+        overlay.tick()
+        require(mark.pill.isHidden,"reloading old completed output does not revive its instruction")
+        require(mark.ring.opacity>0,"label expiry does not erase a persistent selected area")
         let annotations:[[String:Any]]=[["id":"circle","kind":"circle","target":["screenRect":["x":100,"y":100,"w":180,"h":80]],"t":Date().timeIntervalSince1970*1000-5000]]
         overlay.document=["cursors":["fixture":["target":["screen":[420,240]],"state":"waiting","persistent":true,"name":"Motion fixture","annotations":annotations,"t":Date().timeIntervalSince1970*1000]]]
         overlay.tick();await pause(1.5)

@@ -78,7 +78,7 @@ try{
  await voicePage.addInitScript(()=>{window.nativeMessages=[];window.webkit={messageHandlers:{barista:{postMessage:message=>window.nativeMessages.push(message)}}}});
  await voicePage.goto(origin+'/companion?t=test-token');await voicePage.waitForFunction(()=>online);
  await voicePage.evaluate(()=>baristaOpened());assert.equal(warmCalls,1,'opening the native composer prepares its pointer overlay without inference');
- assert.equal(await voicePage.evaluate(()=>['baristaNativeDraft','baristaNativeSubmit','baristaNativeSession','baristaNativeStop','baristaNativeAdvanced','baristaNativeVoicePrepare'].every(key=>typeof window[key]==='function')),true,'native controls have dedicated callbacks');
+ assert.equal(await voicePage.evaluate(()=>['baristaNativeDraft','baristaNativeSubmit','baristaNativeSession','baristaNativeStop','baristaNativeClear','baristaNativeAdvanced','baristaNativeVoicePrepare'].every(key=>typeof window[key]==='function')),true,'native controls have dedicated callbacks');
  const ids=await voicePage.evaluate(async()=>{await makeSession(true);const a=active;await makeSession(true);return [a,active]});
  await voicePage.evaluate(()=>{nativeMessages=[];voiceReply=active;return baristaNativeSession({id:null})});
  assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='silence').length),1,'a new conversation stops the previous conversation’s speech');
@@ -145,6 +145,16 @@ try{
  assert.equal(await voicePage.evaluate(()=>window.injected),undefined);
  await voicePage.evaluate(async({a,b})=>{await baristaNativeSession({id:a});baristaNativeDraft({id:b,text:'stale echo',edit:5})},{a,b});
  assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','late different-session callbacks cannot overwrite draft');
+ companion.annotate(a,{kind:'circle',rect:{x:100,y:100,w:120,h:60}});
+ companion.annotate(b,{kind:'highlight',rect:{x:300,y:100,w:120,h:60}});
+ await voicePage.waitForFunction(()=>current()?.hasMarks===true);
+ const messagesBeforeClear=companion.get(a).messages.length;
+ assert.equal(await voicePage.evaluate(({a})=>baristaNativeClear({id:a}),{a}),true);
+ assert.equal(companion.snapshot().sessions.find(s=>s.id===a).hasMarks,false);
+ assert.equal(companion.snapshot().sessions.find(s=>s.id===b).hasMarks,true,'clear leaves other conversations’ marks in place');
+ assert.equal(companion.get(a).messages.length,messagesBeforeClear);
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','clearing desktop output keeps the draft');
+ companion.clear(b);
  await voicePage.evaluate(()=>baristaNativeAdvanced({visible:true}));assert.equal(await voicePage.locator('#drawer').isVisible(),true);
  assert.equal(await voicePage.locator('#drawer').evaluate(el=>el.scrollHeight<=el.clientHeight),true,'native controls use the outer page scroll, not a nested drawer');
  await voicePage.evaluate(()=>baristaNativeAdvanced({visible:false}));assert.equal(await voicePage.locator('#drawer').isVisible(),false);

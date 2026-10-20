@@ -66,6 +66,18 @@ import AppKit
         let commits = edits.dropFirst(beforeCommit).filter { ($0["text"] as? String)?.contains("確定") == true }
         precondition(!commits.isEmpty && commits.allSatisfy { $0["id"] as? String == "a" }, "IME completion never labels A's text as B's draft")
         precondition(composer.activeSessionID == "b" && editor.string == "keep B existing draft", "the deferred destination loads after composition ends")
+        var cleared: String?
+        composer.onClear = { cleared = $0["id"] as? String }
+        composer.apply(state("keep draft", edit: 3000, id: "b").merging(["hasMarks": true, "status": "done"]) { _, new in new })
+        precondition(!composer.clearMarks.isHidden && composer.clearMarks.isEnabled, "completed desktop marks have an immediate clear control")
+        composer.clearMarks.performClick(nil)
+        precondition(cleared == "b" && editor.string == "keep draft", "clear targets the selected conversation without consuming its draft")
+        cleared = nil
+        composer.apply(state("keep draft", edit: 3000, id: "b").merging(["hasMarks": true, "status": "thinking"]) { _, new in new })
+        composer.clearMarks.performClick(nil)
+        precondition(composer.clearMarks.isHidden && cleared == nil, "a busy turn uses Stop instead of clearing a changing target")
+        composer.apply(state("keep draft", edit: 3000, id: "b").merging(["hasMarks": false]) { _, new in new })
+        precondition(composer.clearMarks.isHidden, "empty conversations do not show an inactive clear control")
         precondition(composer.window == nil, "checks never order a window or send global input")
         print("PASS native editor Enter/Shift-Enter/Escape, real IME, draft callbacks, and stale-ack protection")
     }

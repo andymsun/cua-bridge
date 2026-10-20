@@ -879,9 +879,10 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
                 let motion = c["motion"] as? String
                 mark.annotations(c["annotations"] as? [[String: Any]] ?? [], motion: motion, local: { PointerGeometry.local($0, screen: entry.screen.frame, primaryTop: top) }, resolve: resolve)
                 if motion == nil || !mark.cursor.isTracing { mark.cursor.move(to: p, click: fresh && kind == "click") }
-                if fresh { mark.labelUntil = now.addingTimeInterval(labelSeconds) }
+                if fresh { mark.labelUntil = Date(timeIntervalSince1970: t / 1000).addingTimeInterval(labelSeconds) }
                 let show = persistent || now < mark.labelUntil
-                mark.pill.isHidden = !(show && !text.isEmpty && entry.view.bounds.contains(p))
+                let showLabel = show && (!returning || now < mark.labelUntil)
+                mark.pill.isHidden = !(showLabel && !text.isEmpty && entry.view.bounds.contains(p))
                 if !mark.pill.isHidden {
                     var avoid = occupied[i] ?? []
                     let human = PointerGeometry.local(mouse,screen:entry.screen.frame,primaryTop:top)

@@ -52,9 +52,14 @@ try {
   } };
   const companion = new Companion({ pointers, native });
   const guide = companion.create({ name: "Guide", mode: "guide" });
+  const guideState = () => companion.snapshot().sessions.find(s => s.id === guide.id);
+  assert.equal(guideState().hasMarks, false, "an empty conversation has no desktop marks to clear");
   companion.annotate(guide.id, {kind:"circle",rect:{x:100,y:100,w:120,h:60}});
+  assert.equal(guideState().hasMarks, true, "the UI exposes a way to clear completed marks");
   assert.equal(pointers.snapshot().cursors[guide.cursor].state,"done","manual marks release an idle cursor after the display pause");
   companion.clear(guide.id);
+  assert.equal(guideState().hasMarks, false, "clearing marks updates the UI without deleting the conversation");
+  assert.equal(guideState().name, "Guide");
   await assert.rejects(companion.tool(guide.id, guide.key, "act", { app: "Fixture", index: 1, action: "click" }), /Guide mode/);
   assert.equal(delivered.length, 0);
   await companion.tool(guide.id, guide.key, "read", { app: "Fixture" });

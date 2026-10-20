@@ -48,8 +48,9 @@ export class Companion extends EventEmitter {
   }
 
   snapshot() {
+    const cursors = this.pointers.snapshot().cursors;
     return { backend: config().companion.command, demoActive: !!this.demoActive, error: this.historyError ?? null,
-      sessions: [...this.sessions.values()].map(s => ({ id: s.id, name: s.name, mode: s.mode, status: s.status, route: s.route ?? null, presentation: s.presentation ?? "text", requestedModel: s.requestedModel ?? null, reportedModel: s.reportedModel ?? null, timings: s.timings ?? {}, lastTool: s.lastTool ?? null, messages: s.messages, error: s.error ?? null, area: s.area ?? null, approval: s.approval?.public ?? null })) };
+      sessions: [...this.sessions.values()].map(s => ({ id: s.id, name: s.name, mode: s.mode, status: s.status, route: s.route ?? null, presentation: s.presentation ?? "text", requestedModel: s.requestedModel ?? null, reportedModel: s.reportedModel ?? null, timings: s.timings ?? {}, lastTool: s.lastTool ?? null, messages: s.messages, error: s.error ?? null, area: s.area ?? null, hasMarks: !!cursors[s.cursor]?.target, approval: s.approval?.public ?? null })) };
   }
 
   changed() { this.emit("change", this.snapshot()); }

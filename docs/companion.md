@@ -68,6 +68,8 @@ An active guide cursor stays at its target. It moves aside when your mouse reach
 
 After a turn, ordinary CUA point/action, or manual mark finishes, the cursor holds its position for 2.5 seconds. It waits for any stroke animation to finish. It then returns near your mouse and follows with a small offset. Existing annotations stay in their original positions. A new guide target stops this idle behavior immediately. A completed cursor can return even if its old target window closes.
 
+Completed instructions disappear after the configured label lifetime. Their marks remain until you clear them. The compact popup shows **Done** and a **Clear marks** control for finished output. Clear marks keeps the conversation and draft. An active turn uses **Stop** instead.
+
 The native overlay samples mouse position locally at 30 Hz only while an idle companion exists. It redraws for mouse changes; it does not write each sample to disk or send it to the model. The spring timer stops after the cursor settles. Reduce Motion removes flights. Clear marks or stop the conversation to remove its cursor.
 
 ## Permissions and privacy
