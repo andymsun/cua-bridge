@@ -28,12 +28,14 @@ import AppKit
         visibleFrame: CGRect(x: 0, y: 40, width: 2560, height: 1376), safeTop: 0, isMain: true)
 
     static func geometry() {
-        let compact = CompanionHubGeometry.layout(screens: [external, laptop], expanded: false, contentHeight: 350)!
-        check(compact.screenID == "laptop" && compact.notched, "prefer the real notched display over main")
+        let automatic = CompanionHubGeometry.layout(screens: [external, laptop], expanded: false, contentHeight: 350)!
+        check(automatic.screenID == "external", "the automatic hub uses the main monitor instead of forcing the laptop notch")
+        let compact = CompanionHubGeometry.layout(screens: [external, laptop], expanded: false, contentHeight: 350, preferredScreenID: "laptop")!
+        check(compact.screenID == "laptop" && compact.notched, "an explicit laptop choice uses the real notch")
         check(compact.frame.midX == -960, "derive the camera center on a negative-origin display")
         check(compact.frame.maxY == 1199.5, "preserve fractional safe top and leave a gap below exclusion")
         check(compact.frame.maxY < 1205.5, "all controls lie below menu and camera")
-        let expanded = CompanionHubGeometry.layout(screens: [external, laptop], expanded: true, contentHeight: 380)!
+        let expanded = CompanionHubGeometry.layout(screens: [external, laptop], expanded: true, contentHeight: 380, preferredScreenID: "laptop")!
         check(expanded.frame.maxY == compact.frame.maxY && expanded.frame.minY < compact.frame.minY, "expansion goes downward")
         check(laptop.visibleFrame.contains(expanded.frame), "expanded hub remains in visible bounds")
 
@@ -143,7 +145,7 @@ import AppKit
 
     static func controller() {
         let surface = HubSurfaceRecorder(), notifications = NotificationCenter(), workspace = NotificationCenter()
-        var screens = [external, laptop], screenReads = 0, preferences = CompanionHubPreferences(reduceMotion: true, reduceTransparency: true)
+        var screens = [external, laptop], screenReads = 0, preferences = CompanionHubPreferences(reduceMotion: true, reduceTransparency: true, displayID: "laptop")
         var factories = 0, events: [String] = []
         let hub = CompanionHubController(screens: { screenReads += 1; return screens }, preferences: { preferences },
             notificationCenter: notifications, workspaceNotifications: workspace, makeSurface: { _ in factories += 1; return surface })
@@ -175,7 +177,7 @@ import AppKit
         check(button(root, "hub.session.stop.session-3")?.isHidden != false, "completed sessions do not offer stop")
         let hostControl = button(root, "hub.client.open.client-1")!
         check(hostControl.title.contains("Open host") && (hostControl.accessibilityLabel() ?? "").contains("host"), "connected-client actions explicitly offer host focus, not conversation attachment")
-        check(toggle.nextKeyView === button(root, "hub.ask") && toggle.nextKeyView?.nextKeyView === button(root, "hub.session.open.session-1"), "keyboard order starts with disclosure, Ask, then sessions")
+        check(toggle.nextKeyView === button(root, "hub.ask") && toggle.nextKeyView?.nextKeyView === button(root, "hub.display") && button(root, "hub.display")?.nextKeyView === button(root, "hub.session.open.session-1"), "keyboard order includes the display choice before sessions")
         let open = button(root, "hub.session.open.session-1")!
         open.performClick(nil)
         check(events == ["open:session-1"], "selecting a session never submits a prompt")
@@ -253,10 +255,44 @@ import AppKit
         check(NSApplication.shared.windows.isEmpty, "headless suite never creates a desktop window")
     }
 
+    static func displaySelection() {
+        let surface = HubSurfaceRecorder(), notifications = NotificationCenter()
+        var screens = [external, laptop], preferences = CompanionHubPreferences(reduceMotion: true, reduceTransparency: true)
+        let hub = CompanionHubController(screens: { screens }, preferences: { preferences },
+            selectDisplay: { preferences.displayID = $0 }, notificationCenter: notifications,
+            workspaceNotifications: NotificationCenter(), makeSurface: { _ in surface })
+        let menu = hub.makeMenuItem().submenu!
+        hub.apply(payload())
+        check(surface.frames.last!.minX > 0, "default controller placement uses the external main display")
+        let savedLaptop = menuItem(menu, "hub.display.laptop")!
+        pressMenu(savedLaptop)
+        check(preferences.displayID == "laptop" && surface.frames.last!.maxX < 0, "the menu pins the hub to the chosen notch")
+        let choice = button(hub.contentView, "hub.display") as! NSPopUpButton
+        check(choice.selectedItem?.representedObject as? String == "laptop", "the hub exposes its selected display")
+        let retained = choice.item(at: 1)
+        hub.apply(payload())
+        check(choice.item(at: 1) === retained, "passive payloads do not rebuild an open display menu")
+        screens = [external]; notifications.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        check(preferences.displayID == "laptop" && surface.frames.last!.minX > 0, "a missing preferred display falls back without erasing the preference")
+        check(choice.selectedItem?.isEnabled == false, "the picker explains that the saved display is unavailable")
+        screens = [external, laptop]; hub.reflow()
+        check(surface.frames.last!.maxX < 0 && choice.selectedItem?.isEnabled == true, "the hub returns when the preferred display reconnects")
+        choice.select(choice.itemArray.first { $0.representedObject as? String == "external" })
+        _ = choice.sendAction(choice.action!, to: choice.target)
+        check(preferences.displayID == "external" && surface.frames.last!.minX > 0, "the expanded-hub picker uses the same display action")
+        pressMenu(menuItem(menu, "hub.display.auto")!)
+        check(preferences.displayID == nil && surface.frames.last!.minX > 0, "automatic placement can be restored")
+        screens = [external]
+        _ = savedLaptop.target?.perform(savedLaptop.action, with: savedLaptop)
+        check(preferences.displayID == nil, "stale menu actions cannot choose a disconnected display")
+        check(surface.focusRequests == 0, "display changes and selections do not take keyboard focus")
+        hub.close()
+    }
+
     static func main() {
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.prohibited)
-        geometry(); validation(); controller()
+        geometry(); validation(); controller(); displaySelection()
         print("PASS \(checks) companion hub geometry, payload, accessibility, callback, and passive-focus checks (no windows)")
     }
 }

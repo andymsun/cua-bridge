@@ -2,7 +2,7 @@
 
 ## Scope and work window
 
-The owner requested continued work from 2026-10-20 03:07 to 11:07 local time (UTC−05:00). Tested commits and pushes are authorized. Keep one live GUI operator. Do not replace another session's work or restart unrelated services.
+The owner requested continued work from 2026-10-20 03:07 local time (UTC-05:00), then extended the deadline to 12:30 CST (UTC-06:00), or 13:30 on the current local CDT clock. Tested commits and pushes are authorized. Keep one live GUI operator. Do not replace another session's work or restart unrelated services.
 
 The goals are a reliable desktop companion, a useful home on external monitors and the MacBook notch, clear model choices, accurate drawing, natural cursor motion, and better task guidance. Reproduce observable Clicky behavior with original code and compatible licensed OSS. Do not copy proprietary implementation or artwork, read private Clicky account/history stores, or bypass privacy permissions.
 
@@ -36,4 +36,6 @@ Commit coherent tested batches with explicit source/test/docs paths. Exclude run
 - Existing cursor-first feature pushed as `5173d00` on `feat/andy-barista`.
 - Completion feedback: completed labels expire without removing selected areas. Reloading old output does not revive its instruction. The compact native composer exposes a per-conversation Clear marks action and keeps drafts/history intact.
 - Completion checks passed: companion state, local/model route, process lifecycle, native/web bridge, real AppKit composer, and live synthetic-pointer motion. The stale-label and missing-control checks failed before the fix. Packaged UI coverage will run with the display update.
-- Next batch: display choice, then model controls and guide continuation.
+- Display choice: automatic placement now uses the main monitor. The hub picker and menu can pin a display by stable UUID. A disconnected display falls back without erasing the choice. All 121 headless hub cases passed.
+- Live `build/overnight-v1` checks passed: switch to the MacBook notch, read the saved display UUID, restore the external main monitor, circle a stable native control, and clear its marks while keeping a draft. The current conversations stayed intact. The live fixture now waits for actual window movement rather than a fixed 250 ms delay; Send was replaced as a target because the composer hides that button during a turn.
+- Next batch: explicit model controls and guide continuation.

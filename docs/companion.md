@@ -102,7 +102,11 @@ The default model is `codex/gpt-6-astra`. The other supported choice is `codex/g
 
 ## Notch hub and connected agents
 
-The native hub shows companion sessions and connected CUA clients below the MacBook camera and menu area. A display without a notch gets a compact capsule. Open the hub to choose a conversation, stop its turn, or open an eligible client host. The menu bar provides the same controls. Passive updates do not take focus. Display changes move the hub to a safe position.
+The native hub uses the main display by default. It sits below the menu area on an external monitor and below the camera area on a notched display. Open the hub's **Hub display** picker to pin it to a monitor or the MacBook. The menu-bar **Andy Hub → Display** menu provides the same choice.
+
+The choice survives app restarts. If that display disconnects, the hub uses the main display without erasing the saved choice. It returns when the selected display reconnects. Display choices do not take keyboard focus.
+
+Open the hub to choose a conversation, stop its turn, or open an eligible client host. The menu bar provides the same controls. Passive updates do not take focus.
 
 `cua mcp-config` prints the MCP definition for the selected CUA runtime. It starts no service and changes no client settings. Use the definition in a client's per-session configuration.
 

@@ -8,14 +8,17 @@ struct CompanionHubScreen {
     var auxiliaryLeft: CGRect = .zero
     var auxiliaryRight: CGRect = .zero
     var isMain = false
+    var name = "Display"
 
     @MainActor static func current() -> [CompanionHubScreen] {
-        let main = NSScreen.main
+        let main = NSScreen.screens.first
         return NSScreen.screens.enumerated().map { index, screen in
-            CompanionHubScreen(id: (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.stringValue ?? "screen-\(index)",
-                frame: screen.frame, visibleFrame: screen.visibleFrame, safeTop: screen.safeAreaInsets.top,
+            let number = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+            let uuid = number.flatMap { CGDisplayCreateUUIDFromDisplayID($0)?.takeRetainedValue() }
+            let id = uuid.map { CFUUIDCreateString(nil, $0) as String } ?? number.map { String($0) } ?? "screen-\(index)"
+            return CompanionHubScreen(id: id, frame: screen.frame, visibleFrame: screen.visibleFrame, safeTop: screen.safeAreaInsets.top,
                 auxiliaryLeft: screen.auxiliaryTopLeftArea ?? .zero, auxiliaryRight: screen.auxiliaryTopRightArea ?? .zero,
-                isMain: screen == main)
+                isMain: screen == main, name: screen.localizedName)
         }
     }
 }
@@ -32,7 +35,7 @@ enum CompanionHubGeometry {
             && rect.width > 0 && rect.height > 0
     }
 
-    static func layout(screens: [CompanionHubScreen], expanded: Bool, contentHeight: CGFloat) -> Placement? {
+    static func layout(screens: [CompanionHubScreen], expanded: Bool, contentHeight: CGFloat, preferredScreenID: String? = nil) -> Placement? {
         guard contentHeight.isFinite else { return nil }
         let candidates = screens.compactMap { screen -> (Placement, Bool)? in
             guard valid(screen.frame), valid(screen.visibleFrame), screen.safeTop.isFinite,
@@ -55,7 +58,7 @@ enum CompanionHubGeometry {
             let x = min(max(center - width / 2, visible.minX + 8), visible.maxX - width - 8)
             return (Placement(screenID: screen.id, frame: CGRect(x: x, y: top - height, width: width, height: height), notched: notched), screen.isMain)
         }
-        return (candidates.first { $0.0.notched } ?? candidates.first { $0.1 } ?? candidates.first)?.0
+        return (candidates.first { $0.0.screenID == preferredScreenID } ?? candidates.first { $0.1 } ?? candidates.first)?.0
     }
 }
 
@@ -184,10 +187,13 @@ struct CompanionHubState: Equatable {
 struct CompanionHubPreferences {
     var reduceMotion: Bool
     var reduceTransparency: Bool
+    var displayID: String? = nil
     @MainActor static func current() -> CompanionHubPreferences {
         CompanionHubPreferences(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-            reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency)
+            reduceTransparency: NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+            displayID: UserDefaults.standard.string(forKey: "AndyHubDisplay"))
     }
+    @MainActor static func selectDisplay(_ id: String?) { UserDefaults.standard.set(id, forKey: "AndyHubDisplay") }
 }
 
 // The window boundary keeps passive rendering separate from explicit keyboard ownership.
@@ -236,6 +242,7 @@ struct CompanionHubPreferences {
 private enum CompanionHubAction {
     case toggle, expand, collapse, ask
     case openSession(String), stopSession(String), openHost(String)
+    case selectDisplay(String?)
 }
 
 @MainActor private final class CompanionHubButton: NSButton {
@@ -304,18 +311,23 @@ private enum CompanionHubAction {
     private let document = CompanionHubFlippedView()
     fileprivate let toggle = CompanionHubButton("Andy Hub", id: "hub.toggle")
     private let ask = CompanionHubButton("Ask Andy", id: "hub.ask")
+    private let displays = NSPopUpButton()
+    private var displaySignature: [String] = []
     private var rows: [String: CompanionHubRow] = [:]
     private var elements: [(NSView, CGFloat)] = []
     private var expanded = false, reduceTransparency = false
     fileprivate var onAction: ((CompanionHubAction) -> Void)?
-    var contentHeight: CGFloat { 64 + elements.reduce(0) { $0 + $1.1 } }
+    var contentHeight: CGFloat { 100 + elements.reduce(0) { $0 + $1.1 } }
     override var isFlipped: Bool { true }
 
     init() {
         super.init(frame: .zero)
         wantsLayer = true; layer?.masksToBounds = true
         effect.material = .hudWindow; effect.blendingMode = .withinWindow; effect.state = .active
-        addSubview(effect); addSubview(toggle); addSubview(ask); addSubview(scroll)
+        addSubview(effect); addSubview(toggle); addSubview(ask); addSubview(displays); addSubview(scroll)
+        displays.identifier = NSUserInterfaceItemIdentifier("hub.display"); displays.setAccessibilityLabel("Hub display")
+        displays.toolTip = "Choose the monitor or notch for Andy"; displays.font = .systemFont(ofSize: 12)
+        displays.target = self; displays.action = #selector(displayChosen)
         toggle.isBordered = false; toggle.font = .systemFont(ofSize: 13, weight: .medium)
         scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay; scroll.documentView = document
@@ -332,8 +344,10 @@ private enum CompanionHubAction {
         layer?.cornerRadius = expanded ? 14 : 20
     }
 
+    @objc private func displayChosen() { onAction?(.selectDisplay(displays.selectedItem?.representedObject as? String)) }
+
     fileprivate func update(_ state: CompanionHubState, expanded: Bool, preferences: CompanionHubPreferences,
-                            canAsk: Bool, canOpen: Bool, canStop: Bool, canOpenHost: Bool) {
+                            screens: [CompanionHubScreen], canAsk: Bool, canOpen: Bool, canStop: Bool, canOpenHost: Bool) {
         self.expanded = expanded; reduceTransparency = preferences.reduceTransparency
         updateBackground()
         toggle.title = state.summary
@@ -342,11 +356,26 @@ private enum CompanionHubAction {
         toggle.setAccessibilityHelp("Show companion sessions and connected CUA clients. Escape collapses the hub.")
         toggle.image = NSImage(systemSymbolName: expanded ? "chevron.up" : "chevron.down", accessibilityDescription: nil)
         toggle.imagePosition = .imageTrailing
-        ask.isHidden = !expanded; ask.isEnabled = canAsk; scroll.isHidden = !expanded
+        ask.isHidden = !expanded; ask.isEnabled = canAsk; displays.isHidden = !expanded; scroll.isHidden = !expanded
+        let signature = screens.flatMap { [$0.id, $0.name, String($0.isMain)] } + [preferences.displayID ?? ""]
+        if signature != displaySignature || displays.numberOfItems == 0 {
+            displaySignature = signature; displays.removeAllItems(); displays.addItem(withTitle: "Main display (automatic)")
+            displays.menu?.autoenablesItems = false
+            for (index, screen) in screens.enumerated() {
+                displays.addItem(withTitle: "\(index + 1). \(screen.name)\(screen.isMain ? " · Main" : "")")
+                displays.lastItem?.representedObject = screen.id
+            }
+            if let id = preferences.displayID, !screens.contains(where: { $0.id == id }) {
+                displays.addItem(withTitle: "Saved display unavailable; using main")
+                displays.lastItem?.representedObject = id; displays.lastItem?.isEnabled = false
+            }
+            displays.select(displays.itemArray.first { $0.representedObject as? String == preferences.displayID })
+        }
 
         elements.removeAll()
         var used = Set<String>(), keys: [NSView] = [toggle]
         if expanded && canAsk { keys.append(ask) }
+        if expanded { keys.append(displays) }
         func text(_ title: String, heading: Bool = false, height: CGFloat = 24) {
             let label = NSTextField(wrappingLabelWithString: title)
             label.font = .systemFont(ofSize: 12, weight: heading ? .semibold : .regular)
@@ -415,10 +444,11 @@ private enum CompanionHubAction {
         effect.frame = bounds
         toggle.frame = CGRect(x: 8, y: 8, width: max(24, bounds.width - (expanded ? 124 : 16)), height: 28)
         ask.frame = CGRect(x: bounds.width - 108, y: 8, width: 100, height: 28)
-        scroll.frame = CGRect(x: 10, y: 48, width: max(0, bounds.width - 20), height: max(0, bounds.height - 58))
+        displays.frame = CGRect(x: 10, y: 44, width: max(0, bounds.width - 20), height: 28)
+        scroll.frame = CGRect(x: 10, y: 84, width: max(0, bounds.width - 20), height: max(0, bounds.height - 94))
         scroll.tile()
         let width = scroll.contentSize.width
-        document.setFrameSize(CGSize(width: width, height: max(contentHeight - 64, scroll.contentSize.height)))
+        document.setFrameSize(CGSize(width: width, height: max(contentHeight - 100, scroll.contentSize.height)))
         var y: CGFloat = 0
         for (view, height) in elements {
             view.frame = CGRect(x: 0, y: y, width: width, height: height)
@@ -439,6 +469,7 @@ private enum CompanionHubAction {
     private var hasPayload = false, closed = false
     private let screens: @MainActor () -> [CompanionHubScreen]
     private let preferences: @MainActor () -> CompanionHubPreferences
+    private let selectDisplay: @MainActor (String?) -> Void
     private let makeSurface: @MainActor (CompanionHubView) -> CompanionHubSurface
     private let notificationCenter: NotificationCenter, workspaceNotifications: NotificationCenter
     private var surface: CompanionHubSurface?
@@ -447,10 +478,11 @@ private enum CompanionHubAction {
 
     init(screens: @escaping @MainActor () -> [CompanionHubScreen] = CompanionHubScreen.current,
          preferences: @escaping @MainActor () -> CompanionHubPreferences = CompanionHubPreferences.current,
+         selectDisplay: @escaping @MainActor (String?) -> Void = CompanionHubPreferences.selectDisplay,
          notificationCenter: NotificationCenter = .default,
          workspaceNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter,
          makeSurface: @escaping @MainActor (CompanionHubView) -> CompanionHubSurface = { CompanionHubPanelSurface(contentView: $0) }) {
-        self.screens = screens; self.preferences = preferences; self.makeSurface = makeSurface
+        self.screens = screens; self.preferences = preferences; self.selectDisplay = selectDisplay; self.makeSurface = makeSurface
         self.notificationCenter = notificationCenter; self.workspaceNotifications = workspaceNotifications
         super.init()
         contentView.onAction = { [weak self] in self?.perform($0) }
@@ -486,11 +518,11 @@ private enum CompanionHubAction {
         guard !closed else { return }
         updateMenu()
         guard hasPayload else { return }
-        let options = preferences()
-        contentView.update(state, expanded: expanded, preferences: options, canAsk: onAsk != nil,
+        let options = preferences(), availableScreens = screens()
+        contentView.update(state, expanded: expanded, preferences: options, screens: availableScreens, canAsk: onAsk != nil,
             canOpen: onOpenSession != nil, canStop: onStopSession != nil, canOpenHost: onOpenHost != nil)
         let previous = placement
-        placement = CompanionHubGeometry.layout(screens: screens(), expanded: expanded, contentHeight: contentView.contentHeight)
+        placement = CompanionHubGeometry.layout(screens: availableScreens, expanded: expanded, contentHeight: contentView.contentHeight, preferredScreenID: options.displayID)
         guard let placement else { surface?.hide(); return }
         contentView.setFrameSize(placement.frame.size); contentView.layoutSubtreeIfNeeded()
         if surface == nil { surface = makeSurface(contentView) }
@@ -509,6 +541,9 @@ private enum CompanionHubAction {
             hasPayload = true; expanded = true; refresh(animate: true)
             if placement != nil { surface?.focus(contentView.toggle) }
         case .collapse: collapse()
+        case .selectDisplay(let id):
+            guard id == nil || screens().contains(where: { $0.id == id }) else { return }
+            selectDisplay(id); collapse()
         case .ask:
             guard let onAsk else { return }
             collapse(); onAsk()
@@ -539,6 +574,16 @@ private enum CompanionHubAction {
         expand.keyEquivalent = "h"; expand.keyEquivalentModifierMask = [.control, .option]
         if expanded { _ = action("Collapse hub", "hub.collapse", .collapse) }
         _ = action("Ask Andy", "hub.ask", .ask, enabled: onAsk != nil)
+        let displayRoot = NSMenuItem(title: "Display", action: nil, keyEquivalent: ""), displayMenu = NSMenu(title: "Display")
+        displayRoot.identifier = NSUserInterfaceItemIdentifier("hub.displays"); displayRoot.submenu = displayMenu
+        displayMenu.autoenablesItems = false; menu.addItem(displayRoot)
+        let preferred = preferences().displayID
+        let automatic = CompanionHubMenuAction("Main display (automatic)", id: "hub.display.auto") { [weak self] in self?.perform(.selectDisplay(nil)) }
+        automatic.state = preferred == nil ? .on : .off; displayMenu.addItem(automatic)
+        for (index, screen) in screens().enumerated() {
+            let item = CompanionHubMenuAction("\(index + 1). \(screen.name)\(screen.isMain ? " · Main" : "")", id: "hub.display.\(screen.id)") { [weak self] in self?.perform(.selectDisplay(screen.id)) }
+            item.state = preferred == screen.id ? .on : .off; displayMenu.addItem(item)
+        }
         if !state.sessions.isEmpty { menu.addItem(.separator()); info("Companions") }
         for session in state.sessions {
             let open = action("\(session.name) — \(session.detail)", "hub.session.open.\(session.id)", .openSession(session.id), enabled: state.connected && onOpenSession != nil)
