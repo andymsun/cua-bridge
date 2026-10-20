@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config, defaults, saveConfig } from "./config.mjs";
 import { applyMode, currentMode } from "./harness.mjs";
+import { FILE_BODY_LIMIT } from "./companion-files.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const page = (name) => fs.readFileSync(path.join(here, "..", "web", name), "utf8");
@@ -18,7 +19,7 @@ const safeColor = (c) => (/^#[0-9a-f]{3,8}$|^[a-z]+$/i.test(String(c)) ? c : "#3
 
 export function startWeb({ engine, native, hud, token, status, companion, agentHub }) {
   const instance = randomUUID();
-  let revision = 0;
+  let revision = 0, fileUploads = 0;
   const changed = () => { revision++; };
   companion?.on("change", changed); agentHub?.on("change", changed);
   const companionState = () => ({ ...companion.snapshot(), ...(agentHub ? { hub: agentHub.snapshot() } : {}), version: { instance, revision } });
@@ -40,6 +41,7 @@ export function startWeb({ engine, native, hud, token, status, companion, agentH
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
+    let fileUpload = false;
     if (!authed(req, url)) { res.writeHead(401); return res.end("Missing or wrong token. Open the URL from cua.ui() or the settings command."); }
     try {
       if (url.pathname.startsWith("/api/companion")) {
@@ -58,9 +60,17 @@ export function startWeb({ engine, native, hud, token, status, companion, agentH
         if (req.method !== "POST" || !req.headers["content-type"]?.startsWith("application/json")) return json(res, 415, { error: "Send JSON" });
         const origin = req.headers.origin;
         if (origin && origin !== `http://${req.headers.host}`) return json(res, 403, { error: "Wrong origin" });
-        let raw = "";
-        for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 32768) return json(res, 413, { error: "Request too large" }); }
-        const data = JSON.parse(raw || "{}");
+        if (url.pathname === "/api/companion/file-add") {
+          if (fileUploads >= 4) return json(res, 429, { error: "Four files are being added. Wait, then try again." });
+          fileUploads++; fileUpload = true;
+          req.setTimeout(15000, () => req.destroy());
+        }
+        const limit = fileUpload ? FILE_BODY_LIMIT : 32768;
+        if (Number(req.headers["content-length"]) > limit) { req.resume(); return json(res, 413, { error: "Request too large" }); }
+        const chunks = []; let size = 0;
+        for await (const chunk of req.iterator({ destroyOnReturn: false })) { size += chunk.length; if (size > limit) break; chunks.push(chunk); }
+        if (size > limit) { req.resume(); return json(res, 413, { error: "Request too large" }); }
+        const data = JSON.parse(Buffer.concat(chunks, size).toString("utf8") || "{}");
         switch (url.pathname) {
           case "/api/companion/permissions": {
             if (data.permission !== "accessibility") return json(res, 400, { error: "Only app accessibility is needed by this companion" });
@@ -70,7 +80,9 @@ export function startWeb({ engine, native, hud, token, status, companion, agentH
           case "/api/companion/new": { const s = companion.create(data); return json(res, 200, { id: s.id, ...companionState() }); }
           case "/api/companion/send": companion.send(data.id, data); break;
           case "/api/companion/model": companion.setModel(data.id, data.model); break;
-          case "/api/companion/continue": companion.resume(data.id, data.guideId, data.context); break;
+          case "/api/companion/continue": companion.resume(data.id, data.guideId, data.context, data.files); break;
+          case "/api/companion/file-add": await companion.addFile(data.id, data.file); break;
+          case "/api/companion/file-remove": companion.removeFile(data.id, data.file); break;
           case "/api/companion/end-guide": companion.endGuide(data.id, data.guideId); break;
           case "/api/companion/stop": companion.stop(data.id); break;
           case "/api/companion/stop-all": for (const s of companion.sessions.values()) companion.stop(s.id); break;
@@ -145,7 +157,8 @@ export function startWeb({ engine, native, hud, token, status, companion, agentH
         default:
           res.writeHead(404); return res.end("not found");
       }
-    } catch (e) { return json(res, 500, { error: e.message }); }
+    } catch (e) { if (!req.aborted && !res.destroyed) return json(res, 500, { error: e.message }); }
+    finally { if (fileUpload) fileUploads--; }
   });
 
   // ---- WebSocket transport: one socket per viewer carries frames, cursor, state and input ----

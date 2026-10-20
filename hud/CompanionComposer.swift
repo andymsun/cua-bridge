@@ -8,7 +8,55 @@ private func cafeColor(_ light: UInt32, _ dark: UInt32) -> NSColor {
     }
 }
 
+enum CompanionFileInput {
+    case urls([URL]), image(Data, String), unsupported
+    static func pasted(_ pasteboard: NSPasteboard) -> CompanionFileInput? {
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty { return .urls(urls) }
+        for (type, name) in [(NSPasteboard.PasteboardType.png, "Pasted image.png"), (NSPasteboard.PasteboardType("public.jpeg"), "Pasted image.jpg")] {
+            if let data = pasteboard.data(forType: type) { return .image(data, name) }
+        }
+        return pasteboard.types?.contains(.tiff) == true ? .unsupported : nil
+    }
+    func read() throws -> [[String: String]] {
+        func error(_ message: String) -> NSError { NSError(domain: "CompanionFiles", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+        var files: [(String, Data)] = []
+        switch self {
+        case .urls(let urls):
+            guard !urls.isEmpty, urls.count <= 4 else { throw error("Choose one to four files.") }
+            for url in urls {
+                guard url.isFileURL else { throw error("Choose a local file.") }
+                let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+                guard fd >= 0 else { throw error("The file could not be opened. Choose the original file, not a link.") }
+                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                defer { try? handle.close() }
+                var before = stat(), after = stat()
+                guard fstat(fd, &before) == 0, before.st_mode & S_IFMT == S_IFREG, before.st_size > 0, before.st_size <= 8388608 else { throw error("Choose a nonempty file up to 8 MiB.") }
+                let data = try handle.read(upToCount: 8388609) ?? Data()
+                guard fstat(fd, &after) == 0, data.count == before.st_size, after.st_size == before.st_size,
+                      after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec, after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
+                      after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec, after.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else { throw error("The file changed while it was read. Choose it again.") }
+                files.append((url.lastPathComponent, data))
+            }
+        case .image(let data, let name): files = [(name, data)]
+        case .unsupported: throw error("This clipboard image is TIFF. Export a PNG or JPEG, then attach that file.")
+        }
+        guard files.allSatisfy({ !$0.1.isEmpty && $0.1.count <= 8388608 }), files.reduce(0, { $0 + $1.1.count }) <= 16777216 else { throw error("Use files up to 8 MiB each and 16 MiB together.") }
+        return files.map { ["name": $0.0, "data": $0.1.base64EncodedString()] }
+    }
+}
+
 final class CompanionTextView: NSTextView {
+    var onFiles: ((CompanionFileInput) -> Void)?
+    func acceptFiles(_ pasteboard: NSPasteboard) -> Bool {
+        guard isEditable, !hasMarkedText(), let input = CompanionFileInput.pasted(pasteboard), let onFiles = onFiles else { return false }
+        onFiles(input); return true
+    }
+    override func paste(_ sender: Any?) { if !acceptFiles(.general) { super.paste(sender) } }
+    private func hasFiles(_ pasteboard: NSPasteboard) -> Bool { pasteboard.availableType(from: [.fileURL, .png, .tiff, .init("public.jpeg")]) != nil }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { hasFiles(sender.draggingPasteboard) ? (isEditable ? .copy : []) : super.draggingEntered(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { hasFiles(sender.draggingPasteboard) ? (isEditable ? .copy : []) : super.draggingUpdated(sender) }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { hasFiles(sender.draggingPasteboard) ? isEditable : super.prepareForDragOperation(sender) }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool { hasFiles(sender.draggingPasteboard) ? acceptFiles(sender.draggingPasteboard) : super.performDragOperation(sender) }
     var onSubmit: (() -> Void)?
     var onDismiss: (() -> Void)?
     var onCompositionEnd: (() -> Void)?
@@ -68,6 +116,8 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     let resume = NSButton(title: "Continue guide", target: nil, action: nil)
     private var guideID: String?
     var onResume: (([String: Any]) -> Void)?
+    let attach = NSButton(title: "Attach files", target: nil, action: nil)
+    var onAttach: (() -> Void)?
     let advanced = NSButton(title: "Controls & history", target: nil, action: nil)
     let status = NSTextField(wrappingLabelWithString: "Connecting…")
     private let context = NSTextField(labelWithString: "Your screen companion")
@@ -107,18 +157,22 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         close.setAccessibilityLabel("Dismiss composer"); close.toolTip = "Dismiss · Escape keeps your draft"
         advanced.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)
         advanced.target = self; advanced.action = #selector(toggleAdvanced); advanced.toolTip = "Controls and history"
-        for button in [advanced, close] {
+        attach.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil)
+        attach.target = self; attach.action = #selector(attachFiles); attach.isEnabled = false
+        attach.setAccessibilityLabel("Attach files"); attach.toolTip = "Attach files; they stay local until Send or Continue"
+        for button in [attach, advanced, close] {
             button.imagePosition = .imageOnly; button.isBordered = false
             button.widthAnchor.constraint(equalToConstant: 26).isActive = true
             button.heightAnchor.constraint(equalToConstant: 26).isActive = true
         }
-        let header = NSStackView(views: [cup, title, context, advanced, close])
+        let header = NSStackView(views: [cup, title, context, attach, advanced, close])
         header.spacing = 6; header.distribution = .fill; header.alignment = .centerY
         let scroll = NSScrollView(); scroll.borderType = .noBorder; scroll.drawsBackground = false
         editor.frame = NSRect(x: 0, y: 0, width: 320, height: 44)
         editor.minSize = NSSize(width: 0, height: 44)
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.documentView = editor
         editor.isRichText = false; editor.importsGraphics = false; editor.allowsUndo = true
+        editor.registerForDraggedTypes([.fileURL, .png, .tiff, .init("public.jpeg")])
         editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false
         editor.font = .systemFont(ofSize: 14); editor.textColor = cafeColor(0x302820, 0xf4eade); editor.drawsBackground = false
         editor.textContainerInset = NSSize(width: 2, height: 6)
@@ -199,6 +253,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     @objc private func stopSession() { if let id = activeSessionID { onStop?(["id": id]) } }
     @objc private func clearVisuals() { if clearMarks.isEnabled, let id = activeSessionID { onClear?(["id": id]) } }
     @objc private func resumeGuide() { if resume.isEnabled, let id = activeSessionID, let step = guideID { onResume?(["id": id, "guideId": step]) } }
+    @objc private func attachFiles() { if attach.isEnabled { onAttach?() } }
     @objc private func dictation() { onDictation?() }
     @objc private func toggleAdvanced() { onAdvanced?(["visible": !advancedVisible]) }
     @objc private func sessionChosen() { selectSession(id: sessions.selectedItem?.representedObject as? String) }
@@ -208,7 +263,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     }
     func beginRestore() {
         editor.isEditable = false; send.isEnabled = false; dictate.isEnabled = false; sessions.isEnabled = false
-        clearMarks.isEnabled = false; resume.isEnabled = false
+        clearMarks.isEnabled = false; resume.isEnabled = false; attach.isEnabled = false
         edit = 0; pendingSession = nil; pendingNew = false; deferredState = nil
         status.stringValue = "Restoring drafts…"
     }
@@ -263,10 +318,14 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         if let selected = sessions.itemArray.first(where: { $0.representedObject as? String == id }) { sessions.select(selected) }
         let connected = payload["connected"] as? Bool == true
         let busy = payload["status"] as? String == "thinking" || payload["sending"] as? Bool == true
-        editor.isEditable = id != nil; sessions.isEnabled = connected; send.isEnabled = connected && !busy && id != nil
+        let filesBusy = payload["filesBusy"] as? Bool == true
+        attach.isEnabled = connected && id != nil && !filesBusy
+        let fileCount = payload["fileCount"] as? Int ?? 0
+        attach.toolTip = fileCount > 0 ? "\(fileCount) files for this conversation; add more" : "Attach files; they stay local until Send or Continue"
+        editor.isEditable = id != nil; sessions.isEnabled = connected; send.isEnabled = connected && !busy && id != nil && !filesBusy
         send.isHidden = busy; stop.isHidden = !busy; stop.isEnabled = connected
         guideID = (payload["guideID"] as? String).flatMap { !$0.isEmpty && $0.utf16.count <= 128 ? $0 : nil }
-        resume.isHidden = guideID == nil || busy; resume.isEnabled = connected && !busy && guideID != nil
+        resume.isHidden = guideID == nil || busy; resume.isEnabled = connected && !busy && guideID != nil && !filesBusy
         clearMarks.isHidden = payload["hasMarks"] as? Bool != true || busy || guideID != nil; clearMarks.isEnabled = connected && !busy && guideID == nil
         dictate.isEnabled = connected
         let voicePhase = payload["voicePhase"] as? String ?? "idle"
@@ -285,6 +344,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
         else if let voiceStatus = payload["voiceStatus"] as? String, !voiceStatus.isEmpty { status.stringValue = voiceStatus }
         else if payload["needsApproval"] as? Bool == true { status.stringValue = "Review approval below" }
         else if let notice = payload["notice"] as? String, !notice.isEmpty { status.stringValue = "Needs your attention below" }
+        else if filesBusy { status.stringValue = "Adding files…" }
         else if busy { status.stringValue = "Working…" }
         else {
             switch payload["status"] as? String {

@@ -2,6 +2,7 @@ import AppKit
 import WebKit
 import Carbon
 import AVFoundation
+import UniformTypeIdentifiers
 
 final class StartupOutput {
     private let lock = NSLock()
@@ -88,6 +89,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var draftEpoch = 0, draftsReady = false
     private var draftNotice = ""
     private var quitID: UUID?
+    private var filePanel: NSOpenPanel?
+    private var fileRequest: String?
     private var draftSessions = Set<String>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -141,6 +144,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             web.topAnchor.constraint(equalTo: composer.bottomAnchor), web.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             web.trailingAnchor.constraint(equalTo: root.trailingAnchor), web.bottomAnchor.constraint(equalTo: root.bottomAnchor), height
         ])
+        composer.onAttach = { [weak self] in self?.beginFiles() }
+        composer.editor.onFiles = { [weak self] input in self?.beginFiles(input) }
         composer.onDraft = { [weak self] in self?.cacheDraft($0); self?.nativeCall("baristaNativeDraft", $0) }
         composer.onSubmit = { [weak self] in self?.cacheDraft($0); self?.nativeCall("baristaNativeSubmit", $0) }
         composer.onSession = { [weak self] payload in
@@ -204,6 +209,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         if let config = Bundle.main.object(forInfoDictionaryKey: "CuaConfigPath") as? String { environment["CUA_CONFIG"] = config }
         if let preview = Bundle.main.object(forInfoDictionaryKey: "CuaPreviewPath") as? String { environment["CUA_HUD_APP"] = bundlePath(preview) }
         if let agent = Bundle.main.object(forInfoDictionaryKey: "CuaAgentPath") as? String { environment["CUA_AGENT_APP"] = bundlePath(agent) }
+        if let checker = Bundle.main.object(forInfoDictionaryKey: "CuaFileInfoPath") as? String { environment["CUA_FILE_INFO"] = bundlePath(checker) }
         process.environment = environment; process.standardOutput = output; process.standardError = errors
         do { try process.run() } catch { startupError = error.localizedDescription; NSLog("Companion startup: %@", startupError); return nil }
         DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
@@ -309,13 +315,14 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         if let composer = composer { cacheDraft(composer.draftPayload) }
+        fileRequest = nil; filePanel?.cancel(nil); filePanel = nil
         cancelVoice(); voice.silence(); draftEpoch += 1; draftsReady = false; draftGenerations.removeAll()
         composer?.beginRestore()
     }
     func nativeCall(_ callback: String, _ payload: [String: Any], completion: ((Any?) -> Void)? = nil) {
         guard let web = web else { completion?(nil); return }
         let epoch = draftEpoch
-        let tagged = ["baristaNativeDraft", "baristaNativeSubmit", "baristaRestoreDrafts", "baristaDraftStorage"].contains(callback)
+        let tagged = ["baristaNativeDraft", "baristaNativeSubmit", "baristaRestoreDrafts", "baristaDraftStorage", "baristaFilesPrepare"].contains(callback)
         let data = tagged ? payload.merging(["epoch": epoch]) { _, next in next } : payload
         web.callAsyncJavaScript("return window[callback]?.(payload)", arguments: ["callback": callback, "payload": data], in: nil, in: .page) { [weak self] result in
             guard let self = self, self.draftEpoch == epoch else { return }
@@ -344,6 +351,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
               let body = message.body as? [String: Any], let action = body["action"] as? String,
               body["epoch"] as? Int == draftEpoch else { return }
         switch action {
+        case "filesPick": beginFiles()
         case "select": selectArea()
         case "draw": if let mode=body["kind"] as? String,["circle","highlight","arrow","draw"].contains(mode){selectArea(mode:mode)}
         case "dismiss": dismiss()
@@ -387,7 +395,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
     func rememberApp(_ app: NSRunningApplication?, windowID: CGWindowID? = nil) {
-        guard let app = app, !app.isTerminated, let launch = app.launchDate,
+        guard filePanel == nil, let app = app, !app.isTerminated, let launch = app.launchDate,
+              app.bundleIdentifier != "com.apple.appkit.xpc.openAndSavePanelService",
               app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
               !(app.bundleIdentifier ?? "").hasPrefix("com.andymsun.cua.") else { return }
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
@@ -413,6 +422,49 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
               app.bundleIdentifier == (client["host"] as? [String: Any])?["bundleId"] as? String else { return }
         app.activate(options: [])
     }
+    func beginFiles(_ input: CompanionFileInput? = nil) {
+        guard draftsReady, !terminating, !composer.editor.hasMarkedText() else { return }
+        guard fileRequest == nil else { evaluate("window.baristaNativeError?.('Wait for the current file operation, then try again.')"); return }
+        let request = UUID().uuidString, epoch = draftEpoch
+        fileRequest = request
+        nativeCall("baristaFilesPrepare", ["id": composer.activeSessionID as Any? ?? NSNull(), "requestID": request]) { [weak self] value in
+            guard let self = self, self.fileRequest == request, self.draftEpoch == epoch else { return }
+            guard let binding = value as? [String: Any], binding["id"] as? String == self.composer.activeSessionID else { self.fileRequest = nil; return }
+            if let input = input { self.readFiles(input, binding: binding, request: request, epoch: epoch); return }
+            let picker = NSOpenPanel(); self.filePanel = picker
+            picker.title = "Files for this conversation"; picker.prompt = "Attach"
+            picker.message = "Up to four files, 8 MiB each and 16 MiB together. Text: 256 KiB. Files stay local until Send or Continue."
+            picker.canChooseDirectories = false; picker.canChooseFiles = true; picker.allowsMultipleSelection = true
+            picker.allowedContentTypes = [.png, .jpeg, .pdf, .plainText, .commaSeparatedText, UTType(filenameExtension: "md") ?? .plainText]
+            picker.begin { [weak self] response in
+                guard let self = self, self.fileRequest == request, self.draftEpoch == epoch else { return }
+                self.filePanel = nil
+                if response == .OK { self.readFiles(.urls(picker.urls), binding: binding, request: request, epoch: epoch) }
+                else { self.fileRequest = nil; self.nativeCall("baristaFilesCancel", binding) }
+            }
+        }
+    }
+    private func readFiles(_ input: CompanionFileInput, binding: [String: Any], request: String, epoch: Int) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try input.read() }
+            DispatchQueue.main.async {
+                guard let self = self, self.fileRequest == request, self.draftEpoch == epoch else { return }
+                guard !self.terminating, binding["id"] as? String == self.composer.activeSessionID else {
+                    self.fileRequest = nil; self.nativeCall("baristaFilesCancel", binding); return
+                }
+                switch result {
+                case .success(let files):
+                    self.nativeCall("baristaFilesAdd", binding.merging(["files": files]) { _, new in new }) { [weak self] _ in
+                        if self?.fileRequest == request { self?.fileRequest = nil }
+                    }
+                case .failure(let error):
+                    self.fileRequest = nil
+                    self.nativeCall("baristaFilesCancel", binding.merging(["message": error.localizedDescription]) { _, new in new })
+                }
+            }
+        }
+    }
+
     func beginVoice(route: String) {
         guard draftsReady, !terminating, voiceCaptureID == nil, !composer.editor.hasMarkedText() else { return }
         let id = UUID().uuidString

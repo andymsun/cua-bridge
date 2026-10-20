@@ -58,7 +58,11 @@ def build(destination, identity, names, isolated=False, runtime_dir=None):
             shutil.copy2(REPO / 'LICENSE', resources / 'LICENSE')
             for helper in ['CuaAgent', 'CuaPreview']:
                 shutil.copytree(destination / f'{helper}.app', app / 'Contents/Helpers' / f'{helper}.app')
-            info.update(CFBundleDisplayName='Andy Barista', CuaCLIPath='Contents/Resources/runtime/server/cli.mjs',
+            file_info = app / 'Contents/Helpers/CuaFileInfo'
+            run('swiftc', '-O', '-swift-version', '5', '-target', f'{platform.machine()}-apple-macos14.0', '-o', file_info, REPO / 'agent/CuaFileInfo.swift')
+            run('codesign', '--force', '--timestamp=none', '--sign', identity, '--identifier', 'com.andymsun.cua.file-info', file_info)
+            run('codesign', '--verify', '--strict', file_info)
+            info.update(CuaFileInfoPath='Contents/Helpers/CuaFileInfo', CFBundleDisplayName='Andy Barista', CuaCLIPath='Contents/Resources/runtime/server/cli.mjs',
                         CuaNodePath=shutil.which('node') or '/usr/bin/node',
                         CuaPreviewPath='Contents/Helpers/CuaPreview.app', CuaAgentPath='Contents/Helpers/CuaAgent.app')
         if isolated and name != 'CuaAgent':

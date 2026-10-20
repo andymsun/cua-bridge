@@ -5,6 +5,8 @@ import AppKit
         NSApplication.shared.setActivationPolicy(.prohibited)
         let composer = CompanionComposer(frame: NSRect(x: 0, y: 0, width: 360, height: 180))
         let editor = composer.editor
+        func descendants(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants($0) } }
+        precondition(descendants(composer).contains { ($0 as? NSButton)?.accessibilityLabel() == "Attach files" }, "the compact composer has an accessible file picker")
         var submitted = 0, dismissed = 0
         composer.onSubmit = { payload in
             precondition(payload["id"] as? String == "a" && payload["text"] as? String == "draft", "native submit forwards selected text as data")

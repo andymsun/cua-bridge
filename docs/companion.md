@@ -34,6 +34,20 @@ A late Send acknowledgment cannot erase newer text. Page reloads use a new resto
 
 Confirmed **Remove** in the native popup deletes that conversation's cached draft. A draft can remain in the private file if its conversation disappears through another interface. The app does not delete recovered text solely because a session list omits it. Browser drafts remain page-local.
 
+## Files for a conversation
+
+Use the paperclip in the native popup, or **Attach files** in the browser. You can also drop files into the editor or paste file objects. Native image paste accepts PNG and JPEG bytes. TIFF clipboard images need an explicit export to PNG or JPEG. Plain text that looks like a path stays text; the app does not open that path.
+
+A conversation can keep four files, with 8 MiB per file and 16 MiB in total. Supported types are PNG, JPEG, PDF, and UTF-8 TXT, Markdown, or CSV. Text files have a 256 KiB limit. Images must have one frame, at most 40 megapixels, and at most 16,384 pixels per side. PDFs must be unencrypted and have 1 to 100 pages. The app rejects unsupported files without conversion or truncation.
+
+**Add stays local.** The file list states that kept files go with later model turns. Add a question, then use **Send**, or use **Continue guide**. Each action freezes the visible file IDs, hashes, and bytes for that turn. An upload that finishes later cannot join it. Exact local cursor requests do not read or send file bytes. Files do not grant desktop access or change Guide/Act approval rules. An image is reference data, not a desktop coordinate map.
+
+File copies survive app restarts in `companion-files` under the selected runtime. The folder uses mode `0700`; copies use `0600`. They are not encrypted at rest. History saves names, IDs, types, byte counts, and hashes, not original paths or file contents. The model receives the selected bytes through stream-json. Its own data policy still applies.
+
+Confirm **Remove** beside a file to delete its local copy and stop its reuse in future turns. This does not retract data already sent to a provider or remove earlier answers from history. Conversation removal also removes its unchanged file copies. Original files stay untouched. A changed copy stays untouched; move it out of `companion-files` before removing its reference. A missing copy can be removed from the list.
+
+The cache has a total limit of 64 copies and 128 MiB, including copies left by an interrupted upload. Those copies are not deleted automatically. If the cache is full, check that folder and keep any needed copies elsewhere before deleting unused copies. File checks use a separate signed process, not the GUI or Accessibility helper. The helper has a CPU limit and checks elapsed time, memory use, image dimensions, and page count. These checks do not prove a document is harmless. Missing native file checks produce an error, not a validation bypass.
+
 ## Guide, point, and act
 
 **Guide me** is the default. The assistant can read app accessibility, point at an element, show a ring or spotlight, and wait for expected text. It cannot send native input through its tools.
