@@ -109,13 +109,13 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: composerHeight), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "Andy Barista"; panel.isReleasedWhenClosed = false
         let label = NSTextField(wrappingLabelWithString: "Connecting to local CUA…")
-        label.frame = NSRect(x: 18, y: 18, width: 324, height: 92); panel.contentView?.addSubview(label); panel.center(); show()
+        label.frame = NSRect(x: 18, y: 18, width: 324, height: 92); panel.contentView?.addSubview(label); panel.center()
         DispatchQueue.global().async { [weak self] in
             guard let self = self else { return }
             let url = self.resolveURL()
             DispatchQueue.main.async {
                 guard let url = url, url.scheme == "http", url.host == "127.0.0.1", url.path == "/companion" else {
-                    label.stringValue = "Andy Barista could not start local CUA.\n\n\(self.startupError)\n\nRun cua doctor, then reopen this app."; return
+                    label.stringValue = "Andy Barista could not start local CUA.\n\n\(self.startupError)\n\nRun cua doctor, then reopen this app."; self.show(); return
                 }
                 self.panel.close(); self.openCompanion(url)
             }
@@ -200,7 +200,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             self.voiceCaptureID = nil
             self.nativeCall("baristaNativeError", ["captureID": id, "message": message])
         }
-        registerShortcuts(); show()
+        registerShortcuts()
+        if CommandLine.arguments.contains("--companion") { show() }
     }
 
     func resolveURL() -> URL? {

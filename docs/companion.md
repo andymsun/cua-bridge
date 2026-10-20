@@ -155,7 +155,11 @@ The selected CLI must support the chosen model and the print/stream-json protoco
 
 ## Notch hub and connected agents
 
-The native hub uses the main display by default. It sits below the menu area on an external monitor and below the camera area on a notched display. Open the hub's **Hub display** picker to pin it to a monitor or the MacBook. The menu-bar **Andy Hub → Display** menu provides the same choice.
+The native hub stays hidden when idle. Hover inside the selected MacBook's camera notch for 120 ms to reveal compact status. On a monitor without a notch, use the centered 268 × 8-point zone at the top edge. No invisible window covers that zone or intercepts its clicks.
+
+Move into the card to keep it open. Move away for 220 ms to hide it. Click the card for sessions and controls. Escape or loss of keyboard focus hides those controls. After Escape, leave the trigger before you enter again. Passive updates never reveal the hub or take focus. Reduce Motion removes the entrance and exit animation. Local pointer checks stop during sleep and after close.
+
+The main display remains the automatic choice. Use the menu-bar **Andy Hub → Display** menu, or the expanded hub's **Hub display** picker, to choose the MacBook notch or an external monitor. A normal app launch stays hidden. **Control+Option+Space**, **Open Andy Barista**, and the explicit `cua companion` command still open the composer. Startup errors remain visible.
 
 The choice survives app restarts. If that display disconnects, the hub uses the main display without erasing the saved choice. It returns when the selected display reconnects. Display choices do not take keyboard focus.
 

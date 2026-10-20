@@ -1,10 +1,12 @@
 import AppKit
+import QuartzCore
 
 struct CompanionHubScreen {
     let id: String
     let frame: CGRect
     let visibleFrame: CGRect
     let safeTop: CGFloat
+    var menuHeight: CGFloat = 24
     var auxiliaryLeft: CGRect = .zero
     var auxiliaryRight: CGRect = .zero
     var isMain = false
@@ -16,7 +18,7 @@ struct CompanionHubScreen {
             let number = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
             let uuid = number.flatMap { CGDisplayCreateUUIDFromDisplayID($0)?.takeRetainedValue() }
             let id = uuid.map { CFUUIDCreateString(nil, $0) as String } ?? number.map { String($0) } ?? "screen-\(index)"
-            return CompanionHubScreen(id: id, frame: screen.frame, visibleFrame: screen.visibleFrame, safeTop: screen.safeAreaInsets.top,
+            return CompanionHubScreen(id: id, frame: screen.frame, visibleFrame: screen.visibleFrame, safeTop: screen.safeAreaInsets.top, menuHeight: NSStatusBar.system.thickness,
                 auxiliaryLeft: screen.auxiliaryTopLeftArea ?? .zero, auxiliaryRight: screen.auxiliaryTopRightArea ?? .zero,
                 isMain: screen == main, name: screen.localizedName)
         }
@@ -28,6 +30,7 @@ enum CompanionHubGeometry {
         let screenID: String
         let frame: CGRect
         let notched: Bool
+        let trigger: CGRect
     }
 
     private static func valid(_ rect: CGRect) -> Bool {
@@ -42,9 +45,7 @@ enum CompanionHubGeometry {
                   screen.safeTop >= 0, screen.safeTop < screen.frame.height else { return nil }
             let visible = screen.frame.intersection(screen.visibleFrame)
             guard valid(visible) else { return nil }
-            let top = min(visible.maxY, screen.frame.maxY - screen.safeTop) - 6
-            let availableHeight = top - visible.minY - 8, availableWidth = visible.width - 16
-            guard availableWidth >= 240, availableHeight >= (expanded ? 120 : 44) else { return nil }
+            guard screen.menuHeight.isFinite, screen.menuHeight >= 0, screen.menuHeight < screen.frame.height else { return nil }
             let left = screen.auxiliaryLeft, right = screen.auxiliaryRight
             let notched = screen.safeTop > 0 && valid(left) && valid(right)
                 && screen.frame.contains(left) && screen.frame.contains(right)
@@ -52,11 +53,16 @@ enum CompanionHubGeometry {
                 && right.minY >= screen.frame.maxY - screen.safeTop
                 && abs(left.minX - screen.frame.minX) < 0.01 && abs(right.maxX - screen.frame.maxX) < 0.01
                 && abs(left.maxY - screen.frame.maxY) < 0.01 && abs(right.maxY - screen.frame.maxY) < 0.01
+            let top = min(visible.maxY, screen.frame.maxY - max(screen.safeTop, screen.menuHeight)) - (notched ? 0 : 6)
+            let availableHeight = top - visible.minY - 8, availableWidth = visible.width - 16
+            guard availableWidth >= 240, availableHeight >= (expanded ? 120 : 44) else { return nil }
             let center = notched ? (left.maxX + right.minX) / 2 : visible.midX
+            let trigger = notched ? CGRect(x: left.maxX, y: screen.frame.maxY - screen.safeTop, width: right.minX - left.maxX, height: screen.safeTop)
+                : CGRect(x: center - min(268, availableWidth) / 2, y: screen.frame.maxY - 8, width: min(268, availableWidth), height: 8)
             let width = min(expanded ? 400 : 268, availableWidth)
             let height = expanded ? min(max(120, contentHeight), 480, availableHeight) : 44
             let x = min(max(center - width / 2, visible.minX + 8), visible.maxX - width - 8)
-            return (Placement(screenID: screen.id, frame: CGRect(x: x, y: top - height, width: width, height: height), notched: notched), screen.isMain)
+            return (Placement(screenID: screen.id, frame: CGRect(x: x, y: top - height, width: width, height: height), notched: notched, trigger: trigger), screen.isMain)
         }
         return (candidates.first { $0.0.screenID == preferredScreenID } ?? candidates.first { $0.1 } ?? candidates.first)?.0
     }
@@ -203,19 +209,22 @@ struct CompanionHubPreferences {
     func display(frame: CGRect, animate: Bool)
     func focus(_ view: NSView)
     func endInteraction()
-    func hide()
+    func hide(animate: Bool)
     func close()
 }
 
 @MainActor private final class CompanionHubPanel: NSPanel {
     var allowsKeyboard = false
+    var onResign: (() -> Void)?
     override var canBecomeKey: Bool { allowsKeyboard }
+    override func resignKey() { let notify = allowsKeyboard; super.resignKey(); if notify { onResign?() } }
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { contentView?.cancelOperation(sender) }
 }
 
 @MainActor private final class CompanionHubPanelSurface: CompanionHubSurface {
     private let panel: CompanionHubPanel
+    private var transition = 0
     init(contentView: CompanionHubView) {
         panel = CompanionHubPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         panel.title = "Andy Hub"; panel.isReleasedWhenClosed = false
@@ -223,22 +232,44 @@ struct CompanionHubPreferences {
         panel.hidesOnDeactivate = false; panel.becomesKeyOnlyIfNeeded = true; panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         panel.contentView = contentView
+        panel.onResign = { [weak contentView] in contentView?.cancelOperation(nil) }
     }
     func display(frame: CGRect, animate: Bool) {
-        if panel.frame != frame { panel.setFrame(frame, display: true, animate: animate) }
+        transition += 1
+        if !panel.isVisible {
+            panel.alphaValue = animate ? 0 : 1
+            panel.setFrame(animate ? frame.offsetBy(dx: 0, dy: 6) : frame, display: true)
+            panel.orderFrontRegardless()
+        }
+        if animate {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.16; context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
+                panel.animator().setFrame(frame, display: true); panel.animator().alphaValue = 1
+            }
+        } else { panel.setFrame(frame, display: true); panel.alphaValue = 1 }
         panel.recalculateKeyViewLoop()
-        if !panel.isVisible { panel.orderFrontRegardless() }
     }
     func focus(_ view: NSView) {
         panel.allowsKeyboard = true
         panel.makeKey(); panel.makeFirstResponder(view)
     }
     func endInteraction() {
-        if panel.isKeyWindow { panel.resignKey() }
         panel.allowsKeyboard = false
+        if panel.isKeyWindow { panel.resignKey() }
     }
-    func hide() { endInteraction(); panel.orderOut(nil) }
-    func close() { endInteraction(); panel.close() }
+    func hide(animate: Bool) {
+        endInteraction(); guard panel.isVisible else { return }
+        transition += 1; let current = transition
+        guard animate else { panel.orderOut(nil); return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12; context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 0
+            panel.animator().setFrame(panel.frame.offsetBy(dx: 0, dy: 6), display: true)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated { guard let self = self, self.transition == current else { return }; self.panel.orderOut(nil) }
+        }
+    }
+    func close() { transition += 1; endInteraction(); panel.close() }
 }
 
 private enum CompanionHubAction {
@@ -341,8 +372,10 @@ private enum CompanionHubAction {
     override func cancelOperation(_ sender: Any?) { onAction?(.collapse) }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateBackground() }
     private func updateBackground() {
-        effect.isHidden = reduceTransparency
-        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
+        effect.isHidden = reduceTransparency || !expanded
+        effectiveAppearance.performAsCurrentDrawingAppearance { layer?.backgroundColor = (expanded ? NSColor.windowBackgroundColor : .black).cgColor }
+        toggle.contentTintColor = expanded ? nil : .white
+        toggle.attributedTitle = NSAttributedString(string: toggle.title, attributes: [.foregroundColor: expanded ? NSColor.labelColor : .white, .font: toggle.font ?? NSFont.systemFont(ofSize: 13)])
         layer?.cornerRadius = expanded ? 14 : 20
     }
 
@@ -351,11 +384,11 @@ private enum CompanionHubAction {
     fileprivate func update(_ state: CompanionHubState, expanded: Bool, preferences: CompanionHubPreferences,
                             screens: [CompanionHubScreen], canAsk: Bool, canOpen: Bool, canStop: Bool, canOpenHost: Bool) {
         self.expanded = expanded; reduceTransparency = preferences.reduceTransparency
-        updateBackground()
         toggle.title = state.summary
+        updateBackground()
         toggle.setAccessibilityLabel("\(toggle.title), \(expanded ? "collapse" : "expand") sessions")
         toggle.setAccessibilityExpanded(expanded)
-        toggle.setAccessibilityHelp("Show companion sessions and connected CUA clients. Escape collapses the hub.")
+        toggle.setAccessibilityHelp("Hover in the notch or at the selected screen's top center for status. Click for sessions. Escape hides the hub.")
         toggle.image = NSImage(systemSymbolName: expanded ? "chevron.up" : "chevron.down", accessibilityDescription: nil)
         toggle.imagePosition = .imageTrailing
         ask.isHidden = !expanded; ask.isEnabled = canAsk; displays.isHidden = !expanded; scroll.isHidden = !expanded
@@ -460,18 +493,26 @@ private enum CompanionHubAction {
     }
 }
 
+enum CompanionHubPhase { case hidden, hover, expanded }
+
 @MainActor final class CompanionHubController: NSObject {
     var onAsk: (() -> Void)? { didSet { refresh() } }
     var onOpenSession: ((String) -> Void)? { didSet { refresh() } }
     var onStopSession: ((String) -> Void)? { didSet { refresh() } }
     var onOpenHost: ((String) -> Void)? { didSet { refresh() } }
     let contentView = CompanionHubView()
-    private(set) var expanded = false
+    private(set) var phase: CompanionHubPhase = .hidden
+    var expanded: Bool { phase == .expanded }
+    private var suspended = false, hoverSuppressed = false
+    private var enteredAt: TimeInterval?, leftAt: TimeInterval?
+    private var hoverTimer: Timer?
     private var state = CompanionHubState([:])
     private var hasPayload = false, closed = false
     private let screens: @MainActor () -> [CompanionHubScreen]
     private let preferences: @MainActor () -> CompanionHubPreferences
     private let selectDisplay: @MainActor (String?) -> Void
+    private let pointer: @MainActor () -> CGPoint
+    private let clock: @MainActor () -> TimeInterval
     private let makeSurface: @MainActor (CompanionHubView) -> CompanionHubSurface
     private let notificationCenter: NotificationCenter, workspaceNotifications: NotificationCenter
     private var surface: CompanionHubSurface?
@@ -481,17 +522,26 @@ private enum CompanionHubAction {
     init(screens: @escaping @MainActor () -> [CompanionHubScreen] = CompanionHubScreen.current,
          preferences: @escaping @MainActor () -> CompanionHubPreferences = CompanionHubPreferences.current,
          selectDisplay: @escaping @MainActor (String?) -> Void = CompanionHubPreferences.selectDisplay,
+         pointer: @escaping @MainActor () -> CGPoint = { NSEvent.mouseLocation },
+         clock: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          notificationCenter: NotificationCenter = .default,
          workspaceNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter,
          makeSurface: @escaping @MainActor (CompanionHubView) -> CompanionHubSurface = { CompanionHubPanelSurface(contentView: $0) }) {
         self.screens = screens; self.preferences = preferences; self.selectDisplay = selectDisplay; self.makeSurface = makeSurface
+        self.pointer = pointer; self.clock = clock
         self.notificationCenter = notificationCenter; self.workspaceNotifications = workspaceNotifications
         super.init()
         contentView.onAction = { [weak self] in self?.perform($0) }
         notificationCenter.addObserver(self, selector: #selector(reflow), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         workspaceNotifications.addObserver(self, selector: #selector(reflow), name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            workspaceNotifications.addObserver(self, selector: #selector(suspendHover), name: name, object: nil)
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            workspaceNotifications.addObserver(self, selector: #selector(resumeHover), name: name, object: nil)
+        }
     }
-    deinit { notificationCenter.removeObserver(self); workspaceNotifications.removeObserver(self) }
+    deinit { hoverTimer?.invalidate(); notificationCenter.removeObserver(self); workspaceNotifications.removeObserver(self) }
 
     func apply(_ payload: [String: Any]) {
         guard !closed else { return }
@@ -500,7 +550,7 @@ private enum CompanionHubAction {
     @objc func reflow() { refresh() }
     func close() {
         guard !closed else { return }
-        closed = true; expanded = false
+        closed = true; phase = .hidden; hoverTimer?.invalidate(); hoverTimer = nil
         notificationCenter.removeObserver(self); workspaceNotifications.removeObserver(self)
         surface?.close(); surface = nil; placement = nil
         contentView.onAction = nil
@@ -520,19 +570,56 @@ private enum CompanionHubAction {
         guard !closed else { return }
         updateMenu()
         guard hasPayload else { return }
-        let options = preferences(), availableScreens = screens()
+        let options = preferences(), availableScreens = screens(), previous = placement
+        let anchor = CompanionHubGeometry.layout(screens: availableScreens, expanded: false, contentHeight: 44, preferredScreenID: options.displayID)
+        if let previous, previous.screenID != anchor?.screenID || previous.trigger != anchor?.trigger {
+            enteredAt = nil; leftAt = nil; hoverSuppressed = true
+            if phase == .hover { phase = .hidden }
+        }
+        if anchor == nil || suspended { phase = .hidden; enteredAt = nil; leftAt = nil; hoverSuppressed = true }
         contentView.update(state, expanded: expanded, preferences: options, screens: availableScreens, canAsk: onAsk != nil,
             canOpen: onOpenSession != nil, canStop: onStopSession != nil, canOpenHost: onOpenHost != nil)
-        let previous = placement
-        placement = CompanionHubGeometry.layout(screens: availableScreens, expanded: expanded, contentHeight: contentView.contentHeight, preferredScreenID: options.displayID)
-        guard let placement else { surface?.hide(); return }
+        placement = expanded ? CompanionHubGeometry.layout(screens: availableScreens, expanded: true, contentHeight: contentView.contentHeight, preferredScreenID: options.displayID) : anchor
+        if suspended || placement == nil { hoverTimer?.invalidate(); hoverTimer = nil }
+        else if hoverTimer == nil {
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.pollHover() } }
+            timer.tolerance = 0.02; hoverTimer = timer; RunLoop.main.add(timer, forMode: .common)
+        }
+        guard let placement, !suspended, phase != .hidden else { surface?.hide(animate: animate && !options.reduceMotion && !suspended); return }
         contentView.setFrameSize(placement.frame.size); contentView.layoutSubtreeIfNeeded()
         if surface == nil { surface = makeSurface(contentView) }
-        surface?.display(frame: placement.frame,
-            animate: animate && !options.reduceMotion && previous?.screenID == placement.screenID)
+        surface?.display(frame: placement.frame, animate: animate && !options.reduceMotion && previous?.screenID == placement.screenID)
     }
-    private func collapse() {
-        expanded = false; surface?.endInteraction(); refresh()
+    func pollHover() {
+        guard !closed, !suspended, hasPayload, let placement else { return }
+        let point = pointer(), now = clock()
+        guard point.x.isFinite, point.y.isFinite, now.isFinite else { return }
+        let trigger = placement.trigger, inside = trigger.contains(point)
+        if !inside { hoverSuppressed = false }
+        if phase == .expanded { return }
+        if phase == .hidden {
+            guard inside, !hoverSuppressed else { enteredAt = nil; return }
+            if enteredAt == nil { enteredAt = now }
+            if now - enteredAt! >= 0.12 { phase = .hover; leftAt = nil; refresh(animate: true) }
+        } else {
+            let corridor = CGRect(x: trigger.minX, y: placement.frame.maxY, width: trigger.width, height: max(0, trigger.minY - placement.frame.maxY))
+            if inside || corridor.contains(point) || placement.frame.insetBy(dx: -4, dy: -4).contains(point) { leftAt = nil; return }
+            if leftAt == nil { leftAt = now }
+            if now - leftAt! >= 0.22 { collapse(suppressHover: false) }
+        }
+    }
+    @objc private func suspendHover() {
+        guard !closed else { return }
+        suspended = true; phase = .hidden; enteredAt = nil; leftAt = nil; hoverSuppressed = true
+        hoverTimer?.invalidate(); hoverTimer = nil; surface?.hide(animate: false); updateMenu()
+    }
+    @objc private func resumeHover() {
+        guard !closed else { return }
+        suspended = false; hoverSuppressed = true; enteredAt = nil; leftAt = nil; refresh()
+    }
+    private func collapse(suppressHover: Bool = true) {
+        phase = .hidden; enteredAt = nil; leftAt = nil; hoverSuppressed = suppressHover
+        surface?.endInteraction(); refresh(animate: true)
     }
     private func perform(_ action: CompanionHubAction) {
         guard !closed else { return }
@@ -540,7 +627,7 @@ private enum CompanionHubAction {
         case .toggle:
             if expanded { collapse() } else { perform(.expand) }
         case .expand:
-            hasPayload = true; expanded = true; refresh(animate: true)
+            hasPayload = true; phase = .expanded; enteredAt = nil; leftAt = nil; refresh(animate: true)
             if placement != nil { surface?.focus(contentView.toggle) }
         case .collapse: collapse()
         case .selectDisplay(let id):

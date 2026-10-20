@@ -3,12 +3,13 @@ import AppKit
 // Compile with hud/CompanionHub.swift. No NSWindow is created or ordered in this test.
 @MainActor private final class HubSurfaceRecorder: CompanionHubSurface {
     var frames: [CGRect] = [], animations: [Bool] = []
-    var focusRequests = 0, releases = 0, hides = 0, closes = 0
-    func display(frame: CGRect, animate: Bool) { frames.append(frame); animations.append(animate) }
+    var focusRequests = 0, releases = 0, hides = 0, closes = 0, visible = false
+    var hideAnimations: [Bool] = []
+    func display(frame: CGRect, animate: Bool) { visible = true; frames.append(frame); animations.append(animate) }
     func focus(_ view: NSView) { focusRequests += 1 }
     func endInteraction() { releases += 1 }
-    func hide() { hides += 1 }
-    func close() { closes += 1 }
+    func hide(animate: Bool) { visible = false; hides += 1; hideAnimations.append(animate) }
+    func close() { visible = false; closes += 1 }
 }
 
 @main @MainActor struct CompanionHubChecks {
@@ -33,8 +34,10 @@ import AppKit
         let compact = CompanionHubGeometry.layout(screens: [external, laptop], expanded: false, contentHeight: 350, preferredScreenID: "laptop")!
         check(compact.screenID == "laptop" && compact.notched, "an explicit laptop choice uses the real notch")
         check(compact.frame.midX == -960, "derive the camera center on a negative-origin display")
-        check(compact.frame.maxY == 1199.5, "preserve fractional safe top and leave a gap below exclusion")
-        check(compact.frame.maxY < 1205.5, "all controls lie below menu and camera")
+        check(compact.frame.maxY == 1205.5, "the reveal touches the notch's bottom edge without covering its camera")
+        check(compact.trigger == CGRect(x: -1064, y: 1205.5, width: 208, height: 37.5), "only the real camera gap triggers the laptop reveal")
+        check(compact.frame.maxY <= 1205.5, "all controls lie below menu and camera")
+        check(automatic.trigger == CGRect(x: 1146, y: 1432, width: 268, height: 8), "external displays use a bounded centered top-edge trigger")
         let expanded = CompanionHubGeometry.layout(screens: [external, laptop], expanded: true, contentHeight: 380, preferredScreenID: "laptop")!
         check(expanded.frame.maxY == compact.frame.maxY && expanded.frame.minY < compact.frame.minY, "expansion goes downward")
         check(laptop.visibleFrame.contains(expanded.frame), "expanded hub remains in visible bounds")
@@ -45,13 +48,13 @@ import AppKit
             auxiliaryRight: CGRect(x: -920, y: 269.75, width: 720.25, height: 30))
         let shifted = CompanionHubGeometry.layout(screens: [asymmetric], expanded: true, contentHeight: 250)!
         check(shifted.frame.midX == -1010, "auxiliary area edges determine the center, not a hardcoded notch width")
-        check(shifted.frame.maxY == 263.75, "fractional displays below the main display stay below safe top")
+        check(shifted.frame.maxY == 269.75, "fractional displays below the main display stay below safe top")
 
         let menu = CompanionHubScreen(id: "menu", frame: laptop.frame,
             visibleFrame: CGRect(x: -1920, y: 60, width: 1920, height: 1120), safeTop: 37.5,
             auxiliaryLeft: laptop.auxiliaryLeft, auxiliaryRight: laptop.auxiliaryRight)
         let menuLayout = CompanionHubGeometry.layout(screens: [menu], expanded: true, contentHeight: 5000)!
-        check(menuLayout.frame.maxY == 1174, "a lower visibleFrame wins over safeAreaInsets")
+        check(menuLayout.frame.maxY == 1180, "a lower visibleFrame wins over safeAreaInsets")
         check(menu.visibleFrame.contains(menuLayout.frame), "large contents scroll instead of leaving the display")
         let fallback = CompanionHubGeometry.layout(screens: [external], expanded: false, contentHeight: 0)!
         check(!fallback.notched && fallback.frame.midX == 1280 && fallback.frame.maxY == 1410, "safe capsule on a non-notched display")
@@ -159,9 +162,8 @@ import AppKit
         let menu = hub.makeMenuItem().submenu!
         check(factories == 0 && surface.focusRequests == 0, "initialization and menu fallback do not create or focus windows")
         hub.apply(payload())
-        check(factories == 1 && !hub.expanded && events.isEmpty, "passive payload only displays compact status")
-        check(surface.focusRequests == 0 && surface.animations.allSatisfy { !$0 }, "passive display never takes key focus or animates")
-        check(surface.frames.last!.maxY < 1205.5, "the real controller uses safe geometry")
+        check(factories == 0 && surface.frames.isEmpty && !hub.expanded && events.isEmpty, "idle Andy stays hidden inside the notch; a passive payload draws no card")
+        check(surface.focusRequests == 0 && surface.animations.isEmpty, "hidden updates never take key focus or animate")
         let root = hub.contentView
         let toggle = button(root, "hub.toggle")!
         // AppKit exposes AXUnknown on a detached control; its native cell exposes AXButton.
@@ -195,6 +197,7 @@ import AppKit
         check(labels.contains(where: { $0.contains("Not attached") }), "installed provider rows explicitly say Not attached")
         check(labels.contains(where: { $0.contains("CUA activity") }), "client transport state is not mislabeled as conversation attachment")
 
+        pressMenu(menuItem(menu, "hub.expand")!)
         let focusBefore = surface.focusRequests
         hub.apply(payload()); hub.reflow()
         check(surface.focusRequests == focusBefore, "apply and reflow never restore or steal focus")
@@ -243,7 +246,7 @@ import AppKit
         check(surface.animations.last == true, "explicit expansion may animate when Reduce Motion is off")
         root.cancelOperation(nil)
         check(!hub.expanded && surface.releases > 0, "Escape collapses and releases hub keyboard ownership")
-        check(surface.frames.last!.height == 44, "collapse restores the compact surface")
+        check(!surface.visible, "Escape hides the hub instead of restoring a persistent card")
 
         screens = []
         hub.reflow()
@@ -258,44 +261,97 @@ import AppKit
         check(NSApplication.shared.windows.isEmpty, "headless suite never creates a desktop window")
     }
 
+    static func hover() {
+        let surface = HubSurfaceRecorder(), workspace = NotificationCenter()
+        var point = CGPoint(x: -1500, y: 700), time = 0.0, samples = 0
+        let preferences = CompanionHubPreferences(reduceMotion: false, reduceTransparency: false, displayID: "laptop")
+        let hub = CompanionHubController(screens: { [external, laptop] }, preferences: { preferences },
+            pointer: { samples += 1; return point }, clock: { time },
+            notificationCenter: NotificationCenter(), workspaceNotifications: workspace, makeSurface: { _ in surface })
+        hub.apply(payload())
+        func move(_ next: CGPoint, _ elapsed: Double = 0) { point = next; time += elapsed; hub.pollHover() }
+        let trigger = CGPoint(x: -960, y: 1224), outside = CGPoint(x: -1500, y: 700)
+        move(trigger); move(outside, 0.08); move(trigger, 0.04); move(trigger, 0.119)
+        check(!surface.visible, "a brief crossing does not reveal the notch")
+        move(trigger, 0.002)
+        check(surface.visible && hub.phase == .hover && !hub.expanded, "a dwell inside the real notch reveals compact status")
+        check(surface.frames.last!.height == 44 && surface.focusRequests == 0, "hover never takes keyboard focus or opens the large controls")
+        move(CGPoint(x: surface.frames.last!.midX, y: surface.frames.last!.midY), 0.1)
+        check(surface.visible, "the person can enter the revealed card")
+        move(outside, 0.01); move(outside, 0.219)
+        check(surface.visible, "a short exit does not flicker")
+        move(trigger, 0.001); move(outside, 0.01); move(outside, 0.221)
+        check(!surface.visible && hub.phase == .hidden, "leaving hides the preview after its exit delay")
+        move(trigger); move(trigger, 0.13)
+        check(surface.visible && hub.phase == .hover, "immediate reentry after automatic hide needs no extra outside poll")
+        hub.contentView.cancelOperation(nil); move(trigger, 1)
+        check(!surface.visible, "Escape cannot immediately reveal again under a stationary pointer")
+        move(outside); move(trigger); move(trigger, 0.13)
+        check(surface.visible, "leaving the trigger rearms hover")
+        button(hub.contentView, "hub.toggle")!.performClick(nil); move(outside, 1)
+        check(hub.expanded && surface.focusRequests == 1 && surface.visible, "explicit keyboard interaction survives pointer exit")
+        workspace.post(name: NSWorkspace.willSleepNotification, object: nil)
+        check(!surface.visible && hub.phase == .hidden, "sleep hides the hub without changing its session data")
+        let asleepSamples = samples; hub.pollHover()
+        check(samples == asleepSamples, "sleep stops pointer sampling")
+        workspace.post(name: NSWorkspace.didWakeNotification, object: nil)
+        point = trigger; hub.pollHover(); time += 1; hub.pollHover()
+        check(!surface.visible, "wake does not reveal under a stationary pointer")
+        move(outside); move(trigger); move(trigger, 0.13)
+        check(surface.visible, "a new hover works after wake")
+        hub.close(); let closedSamples = samples
+        RunLoop.current.run(until: Date().addingTimeInterval(0.12)); hub.pollHover()
+        check(samples == closedSamples && !surface.visible, "close invalidates the real timer and is terminal")
+    }
+
     static func displaySelection() {
         let surface = HubSurfaceRecorder(), notifications = NotificationCenter()
         var screens = [external, laptop], preferences = CompanionHubPreferences(reduceMotion: true, reduceTransparency: true)
+        var point = CGPoint.zero, time = 0.0
         let hub = CompanionHubController(screens: { screens }, preferences: { preferences },
-            selectDisplay: { preferences.displayID = $0 }, notificationCenter: notifications,
+            selectDisplay: { preferences.displayID = $0 }, pointer: { point }, clock: { time }, notificationCenter: notifications,
             workspaceNotifications: NotificationCenter(), makeSurface: { _ in surface })
+        func reveal(_ screen: CompanionHubScreen) {
+            point = CGPoint(x: screen.frame.midX, y: screen.frame.midY); hub.pollHover()
+            point = CGPoint(x: screen.frame.midX, y: screen.frame.maxY - 4); hub.pollHover()
+            time += 0.13; hub.pollHover()
+        }
         let menu = hub.makeMenuItem().submenu!
-        hub.apply(payload())
-        check(surface.frames.last!.minX > 0, "default controller placement uses the external main display")
+        hub.apply(payload()); check(surface.frames.isEmpty, "display metadata never reveals a hidden hub")
+        reveal(external)
+        check(surface.frames.last!.minX > 0, "default hover uses the external main display")
+        let externalFrame = surface.frames.last!
+        point = CGPoint(x: externalFrame.midX, y: externalFrame.maxY + 12); time += 1; hub.pollHover()
+        check(surface.visible, "the narrow corridor bridges the external menu-bar gap")
         let savedLaptop = menuItem(menu, "hub.display.laptop")!
-        pressMenu(savedLaptop)
-        check(preferences.displayID == "laptop" && surface.frames.last!.maxX < 0, "the menu pins the hub to the chosen notch")
+        pressMenu(savedLaptop); check(!surface.visible, "a display choice waits for hover instead of revealing")
+        reveal(laptop)
+        check(preferences.displayID == "laptop" && surface.frames.last!.maxX < 0, "the menu pins hover to the chosen real notch")
         let choice = button(hub.contentView, "hub.display") as! NSPopUpButton
         check(choice.selectedItem?.representedObject as? String == "laptop", "the hub exposes its selected display")
-        let retained = choice.item(at: 1)
-        hub.apply(payload())
+        let retained = choice.item(at: 1); hub.apply(payload())
         check(choice.item(at: 1) === retained, "passive payloads do not rebuild an open display menu")
         screens = [external]; notifications.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        check(preferences.displayID == "laptop" && surface.frames.last!.minX > 0, "a missing preferred display falls back without erasing the preference")
+        check(!surface.visible, "unplugging a hovered display hides instead of moving a visible card")
+        reveal(external)
+        check(preferences.displayID == "laptop" && surface.frames.last!.minX > 0, "fallback keeps the saved display choice")
         check(choice.selectedItem?.isEnabled == false, "the picker explains that the saved display is unavailable")
-        screens = [external, laptop]; hub.reflow()
-        check(surface.frames.last!.maxX < 0 && choice.selectedItem?.isEnabled == true, "the hub returns when the preferred display reconnects")
-        choice.select(choice.itemArray.first { $0.representedObject as? String == "external" })
-        _ = choice.sendAction(choice.action!, to: choice.target)
-        check(preferences.displayID == "external" && surface.frames.last!.minX > 0, "the expanded-hub picker uses the same display action")
-        pressMenu(menuItem(menu, "hub.display.auto")!)
+        screens = [external, laptop]; hub.reflow(); reveal(laptop)
+        check(surface.frames.last!.maxX < 0 && choice.selectedItem?.isEnabled == true, "the saved notch returns after reconnection")
+        choice.select(choice.itemArray.first { $0.representedObject as? String == "external" }); _ = choice.sendAction(choice.action!, to: choice.target)
+        reveal(external); check(preferences.displayID == "external" && surface.frames.last!.minX > 0, "the picker uses the same display action")
+        pressMenu(menuItem(menu, "hub.display.auto")!); reveal(external)
         check(preferences.displayID == nil && surface.frames.last!.minX > 0, "automatic placement can be restored")
-        screens = [external]
-        _ = savedLaptop.target?.perform(savedLaptop.action, with: savedLaptop)
+        screens = [external]; _ = savedLaptop.target?.perform(savedLaptop.action, with: savedLaptop)
         check(preferences.displayID == nil, "stale menu actions cannot choose a disconnected display")
-        check(surface.focusRequests == 0, "display changes and selections do not take keyboard focus")
+        check(surface.focusRequests == 0 && surface.animations.allSatisfy { !$0 } && surface.hideAnimations.allSatisfy { !$0 }, "hover respects Reduce Motion and never takes focus")
         hub.close()
     }
 
     static func main() {
         _ = NSApplication.shared
         NSApplication.shared.setActivationPolicy(.prohibited)
-        geometry(); validation(); controller(); displaySelection()
+        geometry(); validation(); controller(); hover(); displaySelection()
         print("PASS \(checks) companion hub geometry, payload, accessibility, callback, and passive-focus checks (no windows)")
     }
 }
