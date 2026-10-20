@@ -23,7 +23,8 @@ a{color:var(--accent);text-underline-offset:2px}a:focus-visible{outline:2px soli
 const token='{{TOKEN}}',$=id=>document.getElementById(id),native=!!window.webkit?.messageHandlers?.barista;
 let state={sessions:[]},active=null,mode='guide',online=false,spotlight=false,showAnswer=false,removeArmed=null,appContext=null,voiceReply=null,spoken='',lastSize=0;
 let uiError='',advanced=false,composing=false,creating=null,voiceCapture=null,voicePhase='idle',voiceStatus='',talking=false,lastHub='';
-let nativeDraftEpoch=0,nativeDraftReady=!native,nativeRestore=null,draftStorageError='';
+let nativeDraftEpoch=0,nativeDraftReady=!native,nativeRestore=null,draftStorageError='',lastConnection='',recoveryPrepared=false;
+const pendingRequests=new Set();
 let filePick=null,fileSerial=0,fileRemoveArmed=null;
 const fileOperations=new Map(),fileErrors=new Map();
 const fileRefs=s=>(s?.files||[]).map(({id,sha256})=>({id,sha256}));
@@ -39,7 +40,13 @@ function renderHistory(){$('history').textContent=(current()?.messages||[]).map(
 function bridge(message){if(!native)throw new Error('Open the native Andy app for desktop gestures, the pointer demo, and voice. Coordinate tools remain available here.');window.webkit.messageHandlers.barista.postMessage({...message,epoch:nativeDraftEpoch})}
 function expanded(){document.body.dataset.expanded=String(advanced||!!current()?.approval||!$('error').hidden||!$('answer').hidden||!$('guide').hidden||!$('fileContext').hidden)}
 function error(message){uiError=bounded(message,4000);$('error').textContent=uiError;$('error').hidden=!uiError;expanded();publishNative()}
-async function api(route,data={}){const r=await fetch('/api/companion'+route,{method:'POST',headers:{'content-type':'application/json','x-cua-token':token},body:JSON.stringify(data)});const result=await r.json();if(!r.ok)throw new Error(result.error||'Request failed. Try again.');return result}
+async function api(route,data={}){
+ if(recoveryPrepared)throw new Error('Wait for local CUA to reconnect.');
+ const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000);pendingRequests.add(controller);publishNative();
+ try{const r=await fetch('/api/companion'+route,{method:'POST',headers:{'content-type':'application/json','x-cua-token':token},body:JSON.stringify(data),signal:controller.signal});const result=await r.json();if(!r.ok)throw new Error(result.error||'Request failed. Try again.');return result}
+ catch(e){if(controller.signal.aborted||!online)throw new Error('The request was not confirmed. Check the conversation history and files before you repeat it.');throw e}
+ finally{clearTimeout(timer);pendingRequests.delete(controller);publishNative()}
+}
 function act(task){return Promise.resolve().then(task).catch(e=>{error(e.message);return false})}
 function sessionMetadata(){return state.sessions.slice(0,8).map(s=>({id:bounded(s.id,128),name:bounded(s.name,80),status:bounded(s.status,32),needsApproval:!!s.approval}))}
 async function changeFiles(id,task){
@@ -193,7 +200,8 @@ window.baristaRestoreDrafts=payload=>{
  const rows=Object.entries(payload.drafts);
  if(rows.length>16||rows.some(([id,d])=>!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)||!d||typeof d.text!=='string'||d.text.length>8000||!Number.isSafeInteger(d.edit)||d.edit<0||!Number.isSafeInteger(d.revision)||d.revision<0))return false;
  if(payload.epoch<nativeDraftEpoch)return false;if(payload.epoch===nativeDraftEpoch)return true;
- nativeDraftEpoch=payload.epoch;nativeDraftReady=false;nativeRestore=payload;restoreNativeDrafts();return true;
+ nativeDraftEpoch=payload.epoch;nativeDraftReady=false;nativeRestore=payload;lastConnection='';
+ if(payload.notice)uiError=bounded(payload.notice,4000);restoreNativeDrafts();publishNative();return true;
 };
 window.baristaDraftStorage=payload=>{
  if(!native||payload?.epoch!==nativeDraftEpoch)return false;
@@ -203,8 +211,16 @@ function publishDraft(id){
  if(!native||!nativeDraftReady||!state.sessions.some(s=>s.id===id))return;
  const d=draft(id);bridge({action:'draftChanged',id,text:d.text,edit:d.edit,generation:d.generation});
 }
+window.baristaPrepareReconnect=payload=>{
+ if(!native||payload?.epoch!==nativeDraftEpoch)return false;
+ if(payload.cancel){recoveryPrepared=false;return true}
+ if(online||composing||creating||filePick||pendingRequests.size||sending.size||fileOperations.size||changingModels.size)return false;
+ recoveryPrepared=true;return true;
+};
 function publishNative(){
- if(!native||!nativeDraftReady)return;
+ if(!native)return;
+ if(nativeDraftEpoch>0){const connection={action:'connectionState',connected:online,pending:pendingRequests.size>0},signature=JSON.stringify(connection);if(signature!==lastConnection){lastConnection=signature;bridge(connection)}}
+ if(!nativeDraftReady)return;
  const s=current(),d=draft(),sessions=sessionMetadata();
  const hub={action:'hubState',connected:online,activeSessionID:active,sessions};
  const metadata=hubMetadata(state.hub);if(metadata)hub.hub=metadata;

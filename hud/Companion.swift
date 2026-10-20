@@ -7,11 +7,13 @@ import UniformTypeIdentifiers
 final class StartupOutput {
     private let lock = NSLock()
     private var bytes = Data()
+    private var overflow = false
+    var exceededLimit: Bool { lock.lock(); defer { lock.unlock() }; return overflow }
     func read(_ handle: FileHandle) {
         while true {
             let chunk = handle.availableData
             if chunk.isEmpty { return }
-            lock.lock(); bytes.append(chunk); if bytes.count > 16384 { bytes = Data(bytes.suffix(16384)) }; lock.unlock()
+            lock.lock(); bytes.append(chunk); if bytes.count > 16384 { overflow = true; bytes = Data(bytes.suffix(16384)) }; lock.unlock()
         }
     }
     var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: bytes, as: UTF8.self) }
@@ -99,6 +101,13 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var filePanel: NSOpenPanel?
     private var fileRequest: String?
     private var draftSessions = Set<String>()
+    private var draftsLoaded = false, draftsLoading = false
+    private var pageConnected = false, pageLoaded = false, pageRequestPending = false
+    private var pageNavigation: WKNavigation?
+    private var recoveryGeneration = 0, recoveryAttempt = 0
+    private var recoveryWork: DispatchWorkItem?, recoveryProcess: Process?
+    private var recoveryPauses = Set<Notification.Name>()
+    private var recoveryNotice = ""
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -175,7 +184,13 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         hub.onOpenHost = { [weak self] id in self?.openHost(id) }
         anchor = NSEvent.mouseLocation
         anchorBounds = (NSScreen.screens.first { $0.frame.contains(anchor) } ?? NSScreen.main)?.visibleFrame ?? .zero
-        web.load(URLRequest(url: url))
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(pauseRecovery(_:)), name: name, object: nil)
+        }
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(resumeRecovery(_:)), name: name, object: nil)
+        }
+        pageNavigation = web.load(URLRequest(url: url, timeoutInterval: 10))
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem?.button?.image = NSImage(systemSymbolName: "cup.and.saucer", accessibilityDescription: "Andy Barista")
         let menu = NSMenu(); menu.addItem(ClosureItem("Open Andy Barista   ⌃⌥Space") { [weak self] in self?.show() })
@@ -239,7 +254,135 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         return URL(string: address)
     }
 
+    static func recoveryURL(_ address: String) -> URL? {
+        guard address.utf8.count <= 1024, let parts = URLComponents(string: address),
+              parts.scheme == "http", parts.host == "127.0.0.1", let port = parts.port, (1...65535).contains(port),
+              parts.user == nil, parts.password == nil, parts.fragment == nil, parts.percentEncodedPath == "/companion",
+              let items = parts.queryItems, items.count == 1, items[0].name == "t", let token = items[0].value,
+              token.range(of: "^[A-Za-z0-9_-]{16,128}$", options: .regularExpression) != nil,
+              parts.percentEncodedQuery == "t=" + token else { return nil }
+        return parts.url
+    }
+    private var recoveryBound: Bool {
+        ProcessInfo.processInfo.environment["CUA_RUN_DIR"].map { !$0.isEmpty } == true ||
+        Bundle.main.object(forInfoDictionaryKey: "CuaRunDir") != nil ||
+        (!CommandLine.arguments.contains("--companion") && Bundle.main.object(forInfoDictionaryKey: "CuaCLIPath") != nil)
+    }
+    private var recoveryLocalReady: Bool {
+        composer?.canReconnect == true && filePanel == nil && fileRequest == nil &&
+        voiceCaptureID == nil && !voicePreparing && selections.isEmpty
+    }
+    private func cancelRecovery() {
+        recoveryGeneration += 1; recoveryWork?.cancel(); recoveryWork = nil
+        if let process = recoveryProcess, process.isRunning {
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+        }
+    }
+    @objc private func pauseRecovery(_ notice: Notification) {
+        recoveryPauses.insert(notice.name); cancelRecovery()
+    }
+    @objc private func resumeRecovery(_ notice: Notification) {
+        recoveryPauses.remove(notice.name == NSWorkspace.didWakeNotification ? NSWorkspace.willSleepNotification : NSWorkspace.sessionDidResignActiveNotification)
+        recoveryAttempt = 0; scheduleRecovery()
+    }
+    private func connectionChanged(_ connected: Bool) {
+        guard pageConnected != connected else { if !connected { scheduleRecovery() }; return }
+        pageConnected = connected
+        if connected {
+            cancelRecovery(); recoveryAttempt = 0
+            nativeCall("baristaPrepareReconnect", ["cancel": true])
+        } else { scheduleRecovery() }
+    }
+    private func scheduleRecovery() {
+        guard !pageConnected, !terminating, recoveryPauses.isEmpty, recoveryWork == nil, recoveryProcess == nil else { return }
+        guard recoveryBound else {
+            composer?.status.stringValue = "Local CUA unavailable"
+            composer?.status.toolTip = "Start the selected CUA runtime, then reopen this popup with its current URL. Your draft stays here."
+            return
+        }
+        let generation = recoveryGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.recoveryGeneration == generation else { return }
+            self.recoveryWork = nil; self.discoverRecoveryURL()
+        }
+        recoveryWork = work
+        let delay = min(15, pow(2, Double(min(recoveryAttempt, 4))))
+        recoveryAttempt += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+    private func discoverRecoveryURL() {
+        guard !pageConnected, !terminating, recoveryPauses.isEmpty, recoveryProcess == nil else { return }
+        guard recoveryLocalReady, !web.isLoading else { scheduleRecovery(); return }
+        let generation = recoveryGeneration, process = Process(), pipe = Pipe(), output = StartupOutput()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        process.currentDirectoryURL = URL(fileURLWithPath: runDir)
+        process.arguments = ["-q", "--noproxy", "*", "--proxy", "", "--proto", "=http", "--connect-timeout", "1", "--max-time", "2",
+            "--max-filesize", "16380", "--fail", "--silent", "--unix-socket", "daemon.sock", "--request", "POST",
+            "--header", "Content-Type: application/json", "--data", "{}", "--write-out", "\n%{http_code}", "http://127.0.0.1/status"]
+        process.standardOutput = pipe; process.standardError = FileHandle.nullDevice; process.standardInput = FileHandle.nullDevice
+        recoveryProcess = process
+        do { try process.run() } catch { recoveryProcess = nil; recoveryUnavailable(); scheduleRecovery(); return }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            if process.isRunning {
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if process.isRunning { kill(process.processIdentifier, SIGKILL) } }
+            }
+        }
+        DispatchQueue.global().async { [weak self] in
+            output.read(pipe.fileHandleForReading); process.waitUntilExit()
+            let text = output.text
+            var url: URL?
+            if process.terminationStatus == 0, !output.exceededLimit, text.hasSuffix("\n200"),
+               let body = String(text.dropLast(4)).data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+               let urls = object["urls"] as? [String: Any], let address = urls["companion"] as? String {
+                url = Self.recoveryURL(address)
+            }
+            let candidate = url
+            DispatchQueue.main.async {
+                guard let self = self, self.recoveryProcess === process else { return }
+                let retry = { [weak self] in self?.recoveryProcess = nil; self?.scheduleRecovery() }
+                guard self.recoveryGeneration == generation, !self.pageConnected, !self.terminating, self.recoveryPauses.isEmpty else { retry(); return }
+                guard let url = candidate else { self.recoveryUnavailable(); retry(); return }
+                guard self.recoveryLocalReady else { retry(); return }
+                if url == self.pageURL && self.pageLoaded { retry(); return }
+                let load = { [weak self] (ready: Any?) in
+                    guard let self = self, self.recoveryProcess === process else { return }
+                    guard self.recoveryGeneration == generation, !self.pageConnected, !self.terminating, self.recoveryPauses.isEmpty else { retry(); return }
+                    guard ready as? Bool == true, self.recoveryLocalReady else {
+                        self.nativeCall("baristaPrepareReconnect", ["cancel": true]); retry(); return
+                    }
+                    self.cacheDraft(self.composer.draftPayload)
+                    self.recoveryProcess = nil; self.cancelRecovery(); self.pageURL = url
+                    self.pageNavigation = self.web.load(URLRequest(url: url, timeoutInterval: 10))
+                }
+                if self.pageLoaded {
+                    var answered = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                        guard !answered, let self = self, self.recoveryProcess === process else { return }
+                        answered = true; self.recoveryProcess = nil
+                        if self.recoveryGeneration == generation && !self.pageConnected && !self.terminating {
+                            self.composer.status.stringValue = "Page did not answer"
+                            self.composer.status.toolTip = "Your draft stays here. Andy will retry the connection, not the request. Copy unsaved text before you close the app."
+                        }
+                        self.scheduleRecovery()
+                    }
+                    self.web.callAsyncJavaScript("return window.baristaPrepareReconnect?.({epoch})", arguments: ["epoch": self.draftEpoch], in: nil, in: .page) { result in
+                        guard !answered else { return }; answered = true
+                        switch result { case .success(let value): load(value); case .failure: load(false) }
+                    }
+                } else { load(true) }
+            }
+        }
+    }
+    private func recoveryUnavailable() {
+        composer?.status.stringValue = "Local CUA unavailable"
+        composer?.status.toolTip = "Start this CUA runtime with its CUA_RUN_DIR, or run cua doctor. Andy will reconnect; it will not resend your request. Your draft stays here."
+    }
+
     @objc func show() {
+        if !pageConnected { recoveryAttempt = 0; scheduleRecovery() }
         let before = CACurrentMediaTime()
         if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             returnApp = front; rememberApp(front)
@@ -300,29 +443,37 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         nativeCall("baristaDraftStorage", ["message": draftNotice])
     }
     private func restoreDrafts() {
-        let epoch = draftEpoch
+        if draftsLoaded { publishSavedDrafts(); return }
+        guard !draftsLoading else { return }
+        draftsLoading = true
         draftStore.load { [weak self] result in
             DispatchQueue.main.async {
-                guard let self = self, self.draftEpoch == epoch else { return }
+                guard let self = self else { return }
+                self.draftsLoading = false; self.draftsLoaded = true
                 switch result {
                 case .success(let saved): self.savedDrafts = saved
                 case .failure(let error):
-                    self.savedDrafts = [:]
                     self.draftNotice = "Saved drafts could not be read: \(error.localizedDescription) The file was not changed. Move companion-drafts.json aside, then reopen the app."
                 }
-                let rows = self.savedDrafts.mapValues { ["text": $0.text, "revision": $0.revision] as [String: Any] }
-                let data = rows.map { id, row in (id, row.merging(["edit": self.draftEdits[id] ?? 0]) { _, next in next }) }
-                self.nativeCall("baristaRestoreDrafts", ["drafts": Dictionary(uniqueKeysWithValues: data), "activeSessionID": self.composer.activeSessionID as Any? ?? NSNull()]) { [weak self] value in
-                    guard let self = self, value as? Bool != true else { return }
-                    self.composer.status.stringValue = "Draft restore unavailable"
-                    self.composer.status.toolTip = "This popup needs the current local CUA server. Finish active CUA sessions, restart that runtime, then reopen Andy. Saved drafts were not changed."
-                }
-                self.nativeCall("baristaDraftStorage", ["message": self.draftNotice])
+                self.publishSavedDrafts()
             }
         }
     }
+    private func publishSavedDrafts() {
+        guard pageLoaded, !web.isLoading, !terminating else { return }
+        // Later pages get memory, including edits the store rejected or could not save.
+        let rows = savedDrafts.mapValues { ["text": $0.text, "revision": $0.revision] as [String: Any] }
+        let data = rows.map { id, row in (id, row.merging(["edit": draftEdits[id] ?? 0]) { _, next in next }) }
+        nativeCall("baristaRestoreDrafts", ["drafts": Dictionary(uniqueKeysWithValues: data), "activeSessionID": composer.activeSessionID as Any? ?? NSNull(), "notice": recoveryNotice]) { [weak self] value in
+            guard let self = self, value as? Bool != true else { return }
+            self.pageLoaded = false; self.connectionChanged(false); self.recoveryUnavailable()
+        }
+        nativeCall("baristaDraftStorage", ["message": draftNotice])
+    }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard webView === web else { return }
         if let composer = composer { cacheDraft(composer.draftPayload) }
+        cancelRecovery(); pageNavigation = navigation; pageConnected = false; pageLoaded = false
         fileRequest = nil; filePanel?.cancel(nil); filePanel = nil
         cancelVoice(); voice.silence(); draftEpoch += 1; draftsReady = false; draftGenerations.removeAll()
         composer?.beginRestore()
@@ -330,7 +481,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func nativeCall(_ callback: String, _ payload: [String: Any], completion: ((Any?) -> Void)? = nil) {
         guard let web = web else { completion?(nil); return }
         let epoch = draftEpoch
-        let tagged = ["baristaNativeDraft", "baristaNativeSubmit", "baristaRestoreDrafts", "baristaDraftStorage", "baristaFilesPrepare"].contains(callback)
+        let tagged = ["baristaNativeDraft", "baristaNativeSubmit", "baristaRestoreDrafts", "baristaDraftStorage", "baristaFilesPrepare", "baristaPrepareReconnect"].contains(callback)
         let data = tagged ? payload.merging(["epoch": epoch]) { _, next in next } : payload
         web.callAsyncJavaScript("return window[callback]?.(payload)", arguments: ["callback": callback, "payload": data], in: nil, in: .page) { [weak self] result in
             guard let self = self, self.draftEpoch == epoch else { return }
@@ -373,7 +524,12 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             if let url = Self.modelDocumentation(body["model"]), !NSWorkspace.shared.open(url) {
                 evaluate("window.baristaNativeError?.(\(json("The browser could not open the model specifications. Open \(url.absoluteString) in your browser.")))")
             }
-        case "draftsRestored": draftsReady = true
+        case "connectionState":
+            guard let connected = body["connected"] as? Bool else { return }
+            pageRequestPending = body["pending"] as? Bool == true
+            if !connected && pageRequestPending { recoveryNotice = "The connection closed during a request. Check the conversation history and files before you repeat it." }
+            connectionChanged(connected)
+        case "draftsRestored": draftsReady = true; recoveryNotice = ""
         case "draftChanged": cacheDraft(body)
         case "draftForgotten":
             guard draftsReady, let id = body["id"] as? String else { return }
@@ -416,6 +572,8 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         nativeCall("baristaContext", appContext)
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === web, navigation === pageNavigation else { return }
+        pageLoaded = true
         restoreDrafts()
         nativeCall("baristaContext", appContext)
         if panel.isVisible { nativeCall("baristaOpened", [:]) }
@@ -500,8 +658,17 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         decisionHandler(.allow)
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        let label = NSTextField(wrappingLabelWithString: "Cannot reach local CUA. Run cua start, then reopen Andy Barista.\n\n\(error.localizedDescription)")
-        label.frame = NSRect(x: 24, y: 100, width: 360, height: 150); panel.contentView?.addSubview(label)
+        guard webView === web, navigation === pageNavigation else { return }
+        cancelRecovery(); pageNavigation = nil; pageLoaded = false; connectionChanged(false); recoveryUnavailable()
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        self.webView(webView, didFailProvisionalNavigation: navigation, withError: error)
+    }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === web else { return }
+        cacheDraft(composer.draftPayload)
+        if pageRequestPending { recoveryNotice = "The page closed during a request. Check the conversation history and files before you repeat it." }
+        cancelRecovery(); pageNavigation = nil; pageLoaded = false; connectionChanged(false); recoveryUnavailable()
     }
 
     func selectArea(mode:String="select") {
@@ -584,7 +751,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard let pageURL = pageURL else { return .terminateNow }
         if terminating { return .terminateLater }
         cacheDraft(composer.draftPayload); cancelVoice(); voice.silence()
-        terminating = true; let requestID = UUID(); quitID = requestID
+        terminating = true; cancelRecovery(); let requestID = UUID(); quitID = requestID
         composer.beginRestore(); composer.status.stringValue = "Saving drafts…"
         var components = URLComponents(url: pageURL, resolvingAgainstBaseURL: false)!
         components.path = "/api/companion/stop-all"
@@ -614,6 +781,7 @@ final class CompanionDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        terminating = true; cancelRecovery(); NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeys.forEach { UnregisterEventHotKey($0) }; if let handler = eventHandler { RemoveEventHandler(handler) }
         holdAction?.cancel()
         cancelVoice();voice.silence();selections.forEach{$0.close()};hub.close()

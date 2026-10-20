@@ -34,6 +34,34 @@ A late Send acknowledgment cannot erase newer text. Page reloads use a new resto
 
 Confirmed **Remove** in the native popup deletes that conversation's cached draft. A draft can remain in the private file if its conversation disappears through another interface. The app does not delete recovered text solely because a session list omits it. Browser drafts remain page-local.
 
+## Native connection recovery
+
+If the local server changes its port or token, the native popup can find its new
+address through that runtime's existing `daemon.sock`. This path never starts or
+restarts a daemon. It needs an explicit `CUA_RUN_DIR` or the standalone app's runtime
+metadata. A manually supplied URL without that binding cannot switch to the default
+runtime. Browser pages cannot use this Unix socket; reopen their current companion
+URL if its port or token changes.
+
+Recovery accepts only a bounded `http://127.0.0.1:PORT/companion?t=TOKEN` address.
+Probes run while disconnected, with delays of 1, 2, 4, 8, then 15 seconds. Each probe
+has a two-second curl timeout and a native stop guard. Sleep, session deactivation,
+quit, or a restored connection cancels a probe. An old result cannot replace a newer
+page. An unanswered page check has a three-second limit. Andy keeps the draft and
+tries again. Recovery does not reveal the popup or take focus.
+
+Before a reload, Andy waits for IME composition, conversation changes, file selection,
+file requests, and unconfirmed page requests. Local API requests have a 30-second
+limit. A timeout keeps the draft and reports an uncertain result, not success.
+**Check the conversation history and files before you repeat an unconfirmed request.**
+Recovery never repeats Send, Continue, approvals, uploads, or voice input.
+
+The first native page loads the draft store. Later pages get the current memory
+copy, including unsaved edits and save errors. A reload does not replace those edits
+with older store data or delete orphaned drafts. An external file conflict stays
+visible and the file stays untouched. If the server stays unavailable, start the
+selected runtime or run `cua doctor`; Andy keeps the draft in the open app.
+
 ## Files for a conversation
 
 Use the paperclip in the native popup, or **Attach files** in the browser. You can also drop files into the editor or paste file objects. Native image paste accepts PNG and JPEG bytes. TIFF clipboard images need an explicit export to PNG or JPEG. Plain text that looks like a path stays text; the app does not open that path.

@@ -237,6 +237,7 @@ final class CompanionComposer: NSView, NSTextViewDelegate {
     }
 
     var draftPayload: [String: Any] { ["id": activeSessionID as Any? ?? NSNull(), "text": editor.string, "edit": edit] }
+    var canReconnect: Bool { !editor.hasMarkedText() && pendingSession == nil && !pendingNew }
     func textDidChange(_ notification: Notification) {
         guard !applying else { return }
         nextEdit = max(nextEdit, edit) + 1; edit = nextEdit; onDraft?(draftPayload)
