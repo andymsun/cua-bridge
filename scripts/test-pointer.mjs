@@ -44,6 +44,7 @@ const { cua } = makeApiFactory({ engine: {}, native: {}, hud: {}, urls: () => ({
 assert.match(await cua.point(fakeApp, 3, "Save"), /element 3 in Fixture: Save/);
 let [mine] = Object.values(read().cursors);
 assert.equal(mine.kind, "point");
+assert.equal(mine.state, "done", "ordinary CUA pointers return after their display pause");
 assert.ok(Math.abs(mine.target.x - 0.3) < 1e-9 && Math.abs(mine.target.y - 0.5) < 1e-9, "points at the element's centre");
 await cua.highlight(fakeApp, 3, "this panel");
 [mine] = Object.values(read().cursors);
@@ -57,7 +58,7 @@ assert.deepEqual(read().cursors, {}, "disposing the session removes its cursor")
 pointers.shutdown();
 assert.equal(fs.existsSync(file), false, "daemon shutdown removes the feed, which ends the overlay");
 console.log("PASS pointer");
-fs.rmSync(temporary, { recursive: true, force: true });
+
 
 // Guide mode and waiting for the person: real App objects over a fake helper.
 {
@@ -75,6 +76,10 @@ fs.rmSync(temporary, { recursive: true, force: true });
   const app = await cua.app("Fixture");
   await app.read({ emit: false });
   cua.guide.start();
+  await cua.point(fakeApp,3,"Guide target");
+  const guideCursor=Object.values(read().cursors)[0];
+  assert.equal(guideCursor.state,"waiting","guide targets do not return to the mouse");
+  assert.equal(guideCursor.persistent,true,"guide targets stay visible until the guide ends");
   await assert.rejects(app.click(0), /guide mode/, "guide mode refuses input");
   await assert.rejects(app.window(5).click(0), /guide mode/, "including on a chosen window");
   assert.deepEqual(sent, [], "nothing reached the helper");
@@ -86,6 +91,8 @@ fs.rmSync(temporary, { recursive: true, force: true });
   await app.read({ emit: false });
   await app.click(0);
   assert.deepEqual(sent, ["press"], "input works again after guide mode");
+  assert.equal(Object.values(read().cursors)[0].state,"done","native action cursors return after the action");
   g.shutdown();
   console.log("PASS guide mode");
 }
+fs.rmSync(temporary, { recursive: true, force: true });

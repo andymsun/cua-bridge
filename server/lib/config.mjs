@@ -69,11 +69,35 @@ export const defaults = {
     labelSeconds: 6,             // how long a pointing label and highlight stay up
     idleSeconds: 8,              // a cursor fades after this long without a new target
     scale: 1.0,
-    colors: ["#339cff", "#ff8a3d", "#36c46f", "#c46bff", "#ff4f7b", "#e8c547"],
+    colors: ["#b57648", "#328b80", "#9274b3", "#c89635", "#b75b71", "#4d86b5"],
   },
+  companion: { command: "andy", args: [], model: "codex/gpt-6-astra" }, // print/stream-json-compatible CLI; no shell expansion or model fallback
   web: { port: 47821, searchEngine: "google" },   // address-bar searches: google | bing | brave | duckduckgo | a URL with %s
   repl: { timeoutMs: 30000, maxOutputChars: 20000 },
 };
+
+// A legacy --model argument is still an explicit selection, not a fallback.
+export function companionBackend() {
+  const backend = config().companion;
+  if (typeof backend.command !== "string" || !backend.command.trim() || !Array.isArray(backend.args) || backend.args.some(arg => typeof arg !== "string")) throw new Error("Set companion.command to an executable and companion.args to an array of strings");
+  if (backend.args.includes("--")) throw new Error("Companion args cannot end option parsing before the pinned model");
+  const approved = new Set(["codex/gpt-6-astra", "codex/gpt-5.6-sol"]);
+  if (!approved.has(backend.model)) throw new Error("Choose an approved companion model: codex/gpt-6-astra or codex/gpt-5.6-sol");
+  const args = []; let selected;
+  for (let i = 0; i < backend.args.length; i++) {
+    const arg = backend.args[i], flag = arg.split("=", 1)[0];
+    if (flag !== "--model" && flag !== "--fallback-model") { args.push(arg); continue; }
+    const value = arg.includes("=") ? arg.slice(flag.length + 1) : backend.args[++i];
+    if (flag === "--fallback-model") {
+      if (value !== "") throw new Error("Companion model fallback is disabled");
+    } else {
+      if (selected !== undefined || !approved.has(value)) throw new Error("Supply one explicit approved companion model");
+      selected = value;
+    }
+  }
+  if (selected && backend.model !== defaults.companion.model && selected !== backend.model) throw new Error("Conflicting companion model selections");
+  return { command: backend.command, args, model: selected ?? backend.model };
+}
 
 function merge(base, over) {
   if (Array.isArray(base) || typeof base !== "object" || base === null) return over ?? base;

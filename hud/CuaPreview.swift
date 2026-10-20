@@ -7,8 +7,8 @@ import AppKit
 
 let fm = FileManager.default
 let home = fm.homeDirectoryForCurrentUser.path
-let runDir = ProcessInfo.processInfo.environment["CUA_RUN_DIR"] ?? "\(home)/Library/Application Support/cua/run"
-let configPath = ProcessInfo.processInfo.environment["CUA_CONFIG"] ?? "\(home)/.config/cua/config.json"
+let runDir = ProcessInfo.processInfo.environment["CUA_RUN_DIR"] ?? (Bundle.main.object(forInfoDictionaryKey: "CuaRunDir") as? String) ?? "\(home)/Library/Application Support/cua/run"
+let configPath = ProcessInfo.processInfo.environment["CUA_CONFIG"] ?? (Bundle.main.object(forInfoDictionaryKey: "CuaConfigPath") as? String) ?? "\(home)/.config/cua/config.json"
 let previewID: String? = {
     guard let index = CommandLine.arguments.firstIndex(of: "--view"), index + 1 < CommandLine.arguments.count else { return nil }
     guard let id = UUID(uuidString: CommandLine.arguments[index + 1]) else { exit(2) }
@@ -193,6 +193,8 @@ final class AgentCursor: NSView {
     private var scoot: (a: CGPoint, b: CGPoint, tilt: CGFloat)?
     private var target: CGPoint?, pendingClick = false, placed = false, axis: CGFloat = 0
     private var settleAt: CFTimeInterval?, timer: Timer?, last: CFTimeInterval = 0
+    private var trace: (lead: [CGPoint], points: [CGPoint], start: CFTimeInterval, leadTime: Double, duration: Double, progress: (CGFloat) -> Void)?
+    var isTracing: Bool { trace != nil }
 
     override var isFlipped: Bool { true }       // y-down, like the frame coordinates it receives
 
@@ -210,13 +212,14 @@ final class AgentCursor: NSView {
         }
         let arrow = CAShapeLayer()
         arrow.path = path
-        arrow.fillColor = NSColor(calibratedWhite: 0.05, alpha: 1).cgColor
+        arrow.fillColor = color.cgColor
         arrow.strokeColor = NSColor.white.cgColor; arrow.lineWidth = 2.2; arrow.lineJoin = .round
         arrow.shadowColor = NSColor.black.cgColor; arrow.shadowOpacity = 0.35; arrow.shadowRadius = 1.5; arrow.shadowOffset = CGSize(width: 0, height: 1)
         holder.addSublayer(arrow)
         layer?.addSublayer(holder)
     }
     required init?(coder: NSCoder) { nil }
+    deinit { timer?.invalidate() }
     override func hitTest(_ p: NSPoint) -> NSView? { nil }
 
     /// Rounded arrowhead, tip near (3.6, 3.6), pointing up-left (y-down coordinates).
@@ -234,7 +237,29 @@ final class AgentCursor: NSView {
         return p
     }
 
+    func begin(at point: CGPoint) {
+        guard !placed, point.x.isFinite, point.y.isFinite else { return }
+        placed = true; x.snap(point.x); y.snap(point.y); vis.snap(1); tick()
+    }
+
+    func follow(_ points: [CGPoint], duration: Double, progress: @escaping (CGFloat) -> Void) {
+        guard let first = points.first, let end = points.last else { return }
+        trace?.progress(1); trace = nil; curve = nil; scoot = nil; target = nil; settleAt = nil
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion || duration == 0 { move(to: end, click: false); progress(1); return }
+        if !placed { x.snap(first.x); y.snap(first.y); placed = true }
+        let from = CGPoint(x: x.value, y: y.value), distance = hypot(from.x-first.x, from.y-first.y)
+        let lead = distance < 1 ? 0 : min(0.5, max(0.12, Double(distance)/1500))
+        trace = (PointerGeometry.flight(from: from, to: first), points, CACurrentMediaTime(), lead, max(0.1,duration), progress)
+        vis.target = 1; progress(0); run()
+    }
+
     func move(to p: CGPoint, click: Bool) {
+        if trace != nil { trace?.progress(1); trace = nil }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            curve = nil; scoot = nil; target = nil; settleAt = nil; pendingClick = false; placed = true
+            x.snap(p.x); y.snap(p.y); rot.snap(Self.rest); stretch.snap(1); squash.snap(1); tilt.snap(0); press.snap(1); vis.snap(1)
+            tick(); return
+        }
         vis.target = 1
         if !placed || vis.value < 0.05 {
             placed = true; x.snap(p.x); y.snap(p.y); curve = nil; scoot = nil
@@ -260,7 +285,11 @@ final class AgentCursor: NSView {
         run()
     }
 
-    func hide() { vis.target = 0; run() }
+    func hide() {
+        trace = nil
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { vis.snap(0); tick() }
+        else if vis.target != 0 { vis.target = 0; run() }
+    }
 
     private func run() {
         guard timer == nil else { return }
@@ -273,6 +302,16 @@ final class AgentCursor: NSView {
         let now = CACurrentMediaTime()
         let dt = CGFloat(min(1.0 / 20, last == 0 ? 1.0 / 60 : now - last)); last = now
         let px = x.value, py = y.value
+        if let path = trace {
+            let elapsed = now - path.start, drawing = elapsed >= path.leadTime
+            let raw = CGFloat(drawing ? (elapsed-path.leadTime)/path.duration : elapsed/max(0.001,path.leadTime))
+            let t = max(0,min(1,raw)), eased = t*t*(3-2*t)
+            let point = PointerGeometry.along(drawing ? path.points : path.lead, progress: eased)
+            x.snap(point.x); y.snap(point.y)
+            if hypot(point.x-px,point.y-py)>0.1 { rot.target = angleTo(rot.value, Self.rest+atan2(point.y-py,point.x-px)*180 / .pi+135) }
+            path.progress(drawing ? eased : 0)
+            if drawing && t >= 1 { trace = nil; rot.target = angleTo(rot.value,Self.rest); stretch.target = 1 }
+        }
         if var cv = curve {
             cv.p.step(dt); curve = cv
             let t = min(1, max(0, cv.p.value)), u = 1 - t
@@ -315,7 +354,7 @@ final class AgentCursor: NSView {
         holder.transform = m
         holder.opacity = Float(v)
         CATransaction.commit()
-        let idle = target == nil && settleAt == nil
+        let idle = trace == nil && target == nil && settleAt == nil
             && [x, y, rot, stretch, squash, tilt, vis, press].allSatisfy { $0.settled }
         if idle { timer?.invalidate(); timer = nil }
     }
@@ -661,122 +700,235 @@ final class OverlayWindow: NSWindow {
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
-/// One agent's cursor on one screen: the spring arrow, a label pill and a highlight ring.
+/// A cursor and a readable café card. The surrounding window stays click-through.
 final class PointerMark {
-    let cursor: AgentCursor, pill = NSTextField(labelWithString: ""), ring = CAShapeLayer()
+    let cursor: AgentCursor, pill = FlippedView(), title = NSTextField(labelWithString: ""), body = NSTextField(wrappingLabelWithString: ""), ring = CAShapeLayer(), leader = CAShapeLayer()
     let color: NSColor
-    var shownAt: Date?, labelUntil = Date.distantPast
+    var labelUntil = Date.distantPast
+    var annotationLayers: [String: CAShapeLayer] = [:], lastMotion: String?
+    weak var canvas: NSView?
     init(in view: NSView, color: NSColor, scale: CGFloat) {
-        self.color = color
-        cursor = AgentCursor(frame: view.bounds, color: color)
-        cursor.autoresizingMask = [.width, .height]
-        view.addSubview(cursor)
+        self.color = color; canvas = view
+        cursor = AgentCursor(frame: view.bounds, color: color); cursor.autoresizingMask = [.width, .height]; view.addSubview(cursor)
         ring.fillColor = color.withAlphaComponent(0.10).cgColor; ring.strokeColor = color.cgColor; ring.lineWidth = 2.5
-        ring.shadowColor = color.cgColor; ring.shadowOpacity = 0.8; ring.shadowRadius = 8; ring.shadowOffset = .zero; ring.opacity = 0
+        ring.shadowColor = color.cgColor; ring.shadowOpacity = 0.4; ring.shadowRadius = 8; ring.opacity = 0
         view.layer?.addSublayer(ring)
-        pill.font = .systemFont(ofSize: 13 * scale, weight: .semibold); pill.textColor = .white
-        pill.wantsLayer = true; pill.layer?.backgroundColor = color.withAlphaComponent(0.92).cgColor
-        pill.layer?.cornerRadius = 9 * scale; pill.alignment = .center; pill.isHidden = true
-        view.addSubview(pill)
+        leader.strokeColor = color.cgColor; leader.lineWidth = 1.5; leader.lineDashPattern = [3, 3]; leader.opacity = 0
+        view.layer?.addSublayer(leader)
+        pill.wantsLayer = true; pill.layer?.backgroundColor = hexColor("#fffaf1").cgColor; pill.layer?.cornerRadius = 13
+        pill.layer?.borderColor = color.withAlphaComponent(0.75).cgColor; pill.layer?.borderWidth = 1.5
+        pill.layer?.shadowColor = NSColor.black.cgColor; pill.layer?.shadowOpacity = 0.18; pill.layer?.shadowRadius = 12; pill.layer?.shadowOffset = CGSize(width: 0, height: -3)
+        title.font = .systemFont(ofSize: 10 * scale, weight: .bold); title.textColor = hexColor("#795034")
+        body.font = .systemFont(ofSize: 13 * scale, weight: .medium); body.textColor = hexColor("#302820"); body.maximumNumberOfLines = 5
+        pill.addSubview(title); pill.addSubview(body); pill.isHidden = true; view.addSubview(pill)
     }
-    func remove() { cursor.removeFromSuperview(); pill.removeFromSuperview(); ring.removeFromSuperlayer() }
+    func label(_ text: String, name: String, state: String, at point: CGPoint, bounds: CGRect, occupied: [CGRect]) -> CGRect {
+        title.stringValue = ["pointing", "idle"].contains(state) ? name : name + " · " + state
+        body.stringValue = text
+        let preferred = max((text as NSString).size(withAttributes:[.font:body.font!]).width, (title.stringValue as NSString).size(withAttributes:[.font:title.font!]).width) + 24
+        let width = min(min(250, bounds.width - 24), max(110, preferred))
+        let height = max(18, body.cell!.cellSize(forBounds: CGRect(x:0,y:0,width:width-24,height:120)).height)
+        let frame = PointerGeometry.bubble(at: point, size: CGSize(width: width, height: height + 42), bounds: bounds, occupied: occupied)
+        pill.frame = frame; title.frame = CGRect(x: 12, y: 9, width: frame.width - 24, height: 14)
+        body.frame = CGRect(x: 12, y: 27, width: frame.width - 24, height: height + 4)
+        return frame
+    }
+    func annotations(_ shapes: [[String: Any]], motion: String?, local: (CGPoint) -> CGPoint, resolve: ([String: Any]) -> (point: CGPoint, rect: CGRect?)?) {
+        let ids = Set(shapes.compactMap { $0["id"] as? String })
+        for id in Array(annotationLayers.keys) where !ids.contains(id) { annotationLayers.removeValue(forKey: id)?.removeFromSuperlayer() }
+        for shape in shapes {
+            guard let id = shape["id"] as? String, let kind = shape["kind"] as? String else { continue }
+            let rect = (shape["target"] as? [String: Any]).flatMap { resolve($0)?.rect }
+            let raw = (shape["points"] as? [[NSNumber]] ?? []).filter { $0.count == 2 }.map { CGPoint(x:$0[0].doubleValue,y:$0[1].doubleValue) }
+            let points = PointerGeometry.stroke(kind: kind, rect: rect, points: raw).map(local)
+            guard let first = points.first else { annotationLayers[id]?.opacity = 0; continue }
+            let layer = annotationLayers[id] ?? { let layer = CAShapeLayer(); canvas?.layer?.insertSublayer(layer, at: 1); annotationLayers[id] = layer; return layer }()
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            let path = CGMutablePath(); path.move(to:first); points.dropFirst().forEach { path.addLine(to:$0) }
+            layer.path = path; layer.fillColor = nil; layer.strokeColor = color.cgColor; layer.lineCap = .round; layer.lineJoin = .round
+            layer.lineWidth = kind == "highlight" ? max(4,rect?.height ?? 20) : 3
+            layer.opacity = kind == "highlight" ? 0.28 : 0.95
+            CATransaction.commit()
+            if motion == id && lastMotion != id {
+                lastMotion = id
+                let age = Date().timeIntervalSince1970 - ((shape["t"] as? NSNumber)?.doubleValue ?? 0)/1000
+                let duration = age < 3 ? ((shape["durationMs"] as? NSNumber)?.doubleValue ?? 900)/1000 : 0
+                cursor.follow(points, duration:duration) { [weak layer] progress in
+                    CATransaction.begin(); CATransaction.setDisableActions(true); layer?.strokeEnd = progress; CATransaction.commit()
+                }
+            }
+        }
+    }
+    func hide() { cursor.hide(); pill.isHidden = true; ring.opacity = 0; leader.opacity = 0; annotationLayers.values.forEach { $0.opacity = 0 } }
+    func remove() { cursor.removeFromSuperview(); pill.removeFromSuperview(); ring.removeFromSuperlayer(); leader.removeFromSuperlayer(); annotationLayers.values.forEach { $0.removeFromSuperlayer() } }
 }
 
 final class PointerOverlay: NSObject, NSApplicationDelegate {
     let path = "\(runDir)/pointers.json"
-    var windows: [(screen: NSScreen, window: OverlayWindow, view: FlippedView)] = []
-    var marks: [String: [Int: PointerMark]] = [:]          // cursor id -> screen index -> mark
-    var seen: [String: Double] = [:]                         // cursor id -> last target time
-    var emptySince: Date?
+    var windows: [(screen: NSScreen, window: OverlayWindow, view: FlippedView, shade: CAShapeLayer)] = []
+    var marks: [String: [Int: PointerMark]] = [:]
+    var seen: [String: Double] = [:]
+    var emptySince: Date?, watcher: DispatchSourceFileSystemObject?, watcherFD: Int32 = -1
+    var modified: Date?, document: [String: Any] = [:]
+    var boundsByID: [UInt32: CGRect] = [:]
+    var readMouse: () -> CGPoint = { NSEvent.mouseLocation }
+    var presenceTimer: Timer?, lastMouse = CGPoint.zero
 
     func applicationDidFinishLaunching(_ n: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        guard holdLock("pointer.lock") else { exit(0) }   // one overlay; a second launch leaves it alone
+        guard holdLock("pointer.lock") else { exit(0) }
         buildWindows()
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.buildWindows() }
-        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.buildWindows(); self?.tick() }
+        watcherFD = open(runDir, O_EVTONLY)
+        if watcherFD >= 0 {
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: watcherFD, eventMask: [.write, .rename, .delete], queue: .main)
+            source.setEventHandler { [weak self] in self?.refresh() }; source.resume(); watcher = source
+        }
+        // File notifications deliver new targets immediately. This slow timer follows native windows and expires labels.
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in self?.refresh(); self?.tick() }
+        refresh()
     }
-
+    func refresh() {
+        guard let attributes = try? fm.attributesOfItem(atPath: path), let date = attributes[.modificationDate] as? Date else { NSApp.terminate(nil); return }
+        guard modified != date else { return }
+        modified = date; document = readJSON(path); tick()
+    }
     func buildWindows() {
-        for m in marks.values.flatMap({ $0.values }) { m.remove() }
-        marks = [:]; seen = [:]
-        windows.forEach { $0.window.orderOut(nil) }
-        windows = NSScreen.screens.map { s in
-            let w = OverlayWindow(screen: s), v = FlippedView(frame: NSRect(origin: .zero, size: s.frame.size))
-            v.wantsLayer = true; w.contentView = v; w.orderFrontRegardless()
-            return (s, w, v)
+        marks.values.flatMap { $0.values }.forEach { $0.remove() }; marks = [:]; seen = [:]
+        windows.forEach { $0.window.close() }
+        windows = NSScreen.screens.map { screen in
+            let window = OverlayWindow(screen: screen), view = FlippedView(frame: NSRect(origin: .zero, size: screen.frame.size))
+            view.wantsLayer = true; view.layer?.masksToBounds = true
+            let shade = CAShapeLayer(); shade.fillColor = NSColor.black.withAlphaComponent(0.34).cgColor; shade.fillRule = .evenOdd; shade.opacity = 0
+            view.layer?.addSublayer(shade); window.contentView = view; window.orderFrontRegardless()
+            return (screen, window, view, shade)
+        }
+        let application = NSRunningApplication.current
+        if let launched = application.launchDate {
+            let record: [String: Any] = ["version": 1, "pid": Int(application.processIdentifier),
+                "process": "\(application.processIdentifier):\(launched.timeIntervalSince1970)",
+                "windows": windows.map { $0.window.windowNumber }]
+            do {
+                let url = URL(fileURLWithPath: "\(runDir)/pointer-windows.json")
+                try JSONSerialization.data(withJSONObject: record).write(to: url, options: .atomic)
+                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            } catch { NSLog("Could not publish guide window identity: %@", error.localizedDescription) }
         }
     }
-
-    /// Global top-left points (CGWindow space) for a target, following its window as it moves.
     func resolve(_ t: [String: Any]) -> (point: CGPoint, rect: CGRect?)? {
         if let s = t["screen"] as? [NSNumber], s.count == 2 { return (CGPoint(x: s[0].doubleValue, y: s[1].doubleValue), nil) }
-        guard let id = (t["windowId"] as? NSNumber)?.uint32Value,
-              let info = (CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]])?.first,
-              (info[kCGWindowIsOnscreen as String] as? Bool) == true,
-              let b = info[kCGWindowBounds as String] as? [String: Double], let x = b["X"], let y = b["Y"], let w = b["Width"], let h = b["Height"] else { return nil }
-        if let r = t["rect"] as? [String: NSNumber] {
-            let rect = CGRect(x: x + (r["x"]?.doubleValue ?? 0) * w, y: y + (r["y"]?.doubleValue ?? 0) * h,
-                              width: (r["w"]?.doubleValue ?? 0) * w, height: (r["h"]?.doubleValue ?? 0) * h)
+        if let r = t["screenRect"] as? [String: NSNumber], let x = r["x"], let y = r["y"], let w = r["w"], let h = r["h"] {
+            let rect = CGRect(x: x.doubleValue, y: y.doubleValue, width: w.doubleValue, height: h.doubleValue)
             return (CGPoint(x: rect.midX, y: rect.midY), rect)
         }
-        guard let nx = (t["x"] as? NSNumber)?.doubleValue, let ny = (t["y"] as? NSNumber)?.doubleValue else { return nil }
-        return (CGPoint(x: x + nx * w, y: y + ny * h), nil)
+        guard let id = (t["windowId"] as? NSNumber)?.uint32Value, let bounds = boundsByID[id] else { return nil }
+        if let r = t["rect"] as? [String: NSNumber] {
+            let rect = CGRect(x: bounds.minX + CGFloat(r["x"]?.doubleValue ?? 0) * bounds.width, y: bounds.minY + CGFloat(r["y"]?.doubleValue ?? 0) * bounds.height,
+                              width: CGFloat(r["w"]?.doubleValue ?? 0) * bounds.width, height: CGFloat(r["h"]?.doubleValue ?? 0) * bounds.height)
+            return (CGPoint(x: rect.midX, y: rect.midY), rect)
+        }
+        guard let x = t["x"] as? NSNumber, let y = t["y"] as? NSNumber else { return nil }
+        return (CGPoint(x: bounds.minX + CGFloat(x.doubleValue) * bounds.width, y: bounds.minY + CGFloat(y.doubleValue) * bounds.height), nil)
     }
-
-    /// Global top-left point -> point in one screen's flipped view (nil when on another screen).
-    func local(_ p: CGPoint, _ s: NSScreen) -> CGPoint? {
-        let top = NSScreen.screens.first?.frame.maxY ?? s.frame.maxY
-        let q = CGPoint(x: p.x - s.frame.minX, y: p.y - (top - s.frame.maxY))
-        return q.x >= -40 && q.y >= -40 && q.x <= s.frame.width + 40 && q.y <= s.frame.height + 40 ? q : nil
-    }
-
-    func tick() {
-        // the daemon removes the file on shutdown: nothing left to draw
-        guard fm.fileExists(atPath: path) else { NSApp.terminate(nil); return }
-        let doc = readJSON(path)
-        let cursors = doc["cursors"] as? [String: [String: Any]] ?? [:]
-        let labelSeconds = (doc["labelSeconds"] as? NSNumber)?.doubleValue ?? 6, idle = (doc["idleSeconds"] as? NSNumber)?.doubleValue ?? 8
-        let scale = CGFloat((doc["scale"] as? NSNumber)?.doubleValue ?? 1)
-        let now = Date()
-        for (id, perScreen) in marks where cursors[id] == nil { perScreen.values.forEach { $0.remove() }; marks[id] = nil; seen[id] = nil }
-        for (id, c) in cursors {
-            guard let target = c["target"] as? [String: Any], let at = resolve(target) else { marks[id]?.values.forEach { $0.cursor.hide() }; continue }
-            let t = (c["t"] as? NSNumber)?.doubleValue ?? 0, fresh = seen[id] != t
-            seen[id] = t
+    func tick(updateWindows: Bool = true) {
+        let cursors = document["cursors"] as? [String: [String: Any]] ?? [:]
+        let labelSeconds = (document["labelSeconds"] as? NSNumber)?.doubleValue ?? 6, idle = (document["idleSeconds"] as? NSNumber)?.doubleValue ?? 8
+        let scale = max(0.7, min(2, CGFloat((document["scale"] as? NSNumber)?.doubleValue ?? 1)))
+        let now = Date(), top = NSScreen.screens.first?.frame.maxY ?? 0
+        let live = cursors.filter { (_, c) in (c["persistent"] as? Bool ?? false) || now.timeIntervalSince1970 - ((c["t"] as? NSNumber)?.doubleValue ?? 0) / 1000 < idle }
+        if updateWindows { boundsByID = [:] }
+        if updateWindows && live.values.contains(where: { c in
+            (c["target"] as? [String: Any])?["windowId"] != nil || (c["annotations"] as? [[String: Any]] ?? []).contains { ($0["target"] as? [String: Any])?["windowId"] != nil }
+        }) {
+            let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            for info in infos {
+                if let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value, let raw = info[kCGWindowBounds as String] as? [String: Any], let rect = CGRect(dictionaryRepresentation: raw as CFDictionary) { boundsByID[id] = rect }
+            }
+        }
+        for id in Array(marks.keys) where cursors[id] == nil { marks[id]?.values.forEach { $0.remove() }; marks[id] = nil; seen[id] = nil }
+        var occupied: [Int: [CGRect]] = [:], spotlights: [Int: (time: Double, rect: CGRect)] = [:]
+        var occupiedTips: [CGPoint] = [], hasPresence = false
+        lastMouse = readMouse()
+        let mouse = CGPoint(x:lastMouse.x,y:top-lastMouse.y)
+        let screens = windows.map { CGRect(x: $0.screen.frame.minX, y: top - $0.screen.frame.maxY, width: $0.screen.frame.width, height: $0.screen.frame.height) }
+        for id in cursors.keys.sorted() {
+            guard let c = live[id], let target = c["target"] as? [String: Any] else { marks[id]?.values.forEach { $0.hide() }; continue }
+            let t = (c["t"] as? NSNumber)?.doubleValue ?? 0, fresh = seen[id] != t; seen[id] = t
+            let tracing = marks[id]?.values.contains { $0.cursor.isTracing } ?? false
+            let returning = c["state"] as? String == "done" && now.timeIntervalSince1970-t/1000 >= 2.5 && !tracing
+            guard let at = resolve(target) ?? (returning ? (point:mouse,rect:nil) : nil) else {marks[id]?.values.forEach{$0.hide()};continue}
             let kind = c["kind"] as? String ?? "point", text = c["label"] as? String ?? ""
-            let color = hexColor(c["color"] as? String ?? "#339cff")
-            let age = now.timeIntervalSince1970 - t / 1000
+            let persistent = c["persistent"] as? Bool ?? false
+            let mouseScreen = screens.first { $0.contains(mouse) }
+            let home = returning ? mouseScreen.map { PointerGeometry.companion(at:mouse,bounds:$0) } : nil
+            hasPresence = hasPresence || home != nil
+            let tip = PointerGeometry.cursor(at: home ?? at.point, occupied: occupiedTips + [mouse], screens: screens); occupiedTips.append(tip)
             for (i, entry) in windows.enumerated() {
-                let mark = marks[id]?[i] ?? { let m = PointerMark(in: entry.view, color: color, scale: scale); marks[id, default: [:]][i] = m; return m }()
-                guard let p = local(at.point, entry.screen), age < idle else { mark.cursor.hide(); mark.pill.isHidden = true; mark.ring.opacity = 0; continue }
-                // the arrow's tip sits on the target; moves follow the target as its window moves
-                mark.cursor.move(to: p, click: fresh && kind == "click")
-                if fresh { mark.labelUntil = now.addingTimeInterval(text.isEmpty && kind != "rect" ? 0 : labelSeconds) }
-                let showLabel = now < mark.labelUntil
-                mark.pill.isHidden = !(showLabel && !text.isEmpty)
-                if !mark.pill.isHidden {
-                    mark.pill.stringValue = text
-                    let size = mark.pill.intrinsicContentSize
-                    mark.pill.frame = NSRect(x: p.x + 18 * scale, y: p.y + 14 * scale, width: size.width + 18 * scale, height: size.height + 8 * scale)
+                let mark = marks[id]?[i] ?? { let m = PointerMark(in: entry.view, color: hexColor(c["color"] as? String ?? "#ad794c"), scale: scale); marks[id, default: [:]][i] = m; return m }()
+                let p = PointerGeometry.local(tip, screen: entry.screen.frame, primaryTop: top)
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                if !returning && tip != at.point {
+                    let path = CGMutablePath(); path.move(to: p); path.addLine(to: PointerGeometry.local(at.point, screen: entry.screen.frame, primaryTop: top))
+                    mark.leader.path = path; mark.leader.opacity = 0.75
+                } else { mark.leader.opacity = 0 }
+                CATransaction.commit()
+                // Every screen receives the same global flight, including its offscreen portions.
+                if let origin = c["origin"] as? [String: NSNumber], let x = origin["x"], let y = origin["y"] {
+                    mark.cursor.begin(at: PointerGeometry.local(CGPoint(x: x.doubleValue, y: y.doubleValue), screen: entry.screen.frame, primaryTop: top))
                 }
-                if let r = at.rect, kind == "rect", showLabel, let o = local(CGPoint(x: r.minX, y: r.minY), entry.screen) {
+                let motion = c["motion"] as? String
+                mark.annotations(c["annotations"] as? [[String: Any]] ?? [], motion: motion, local: { PointerGeometry.local($0, screen: entry.screen.frame, primaryTop: top) }, resolve: resolve)
+                if motion == nil || !mark.cursor.isTracing { mark.cursor.move(to: p, click: fresh && kind == "click") }
+                if fresh { mark.labelUntil = now.addingTimeInterval(labelSeconds) }
+                let show = persistent || now < mark.labelUntil
+                mark.pill.isHidden = !(show && !text.isEmpty && entry.view.bounds.contains(p))
+                if !mark.pill.isHidden {
+                    var avoid = occupied[i] ?? []
+                    let human = PointerGeometry.local(mouse,screen:entry.screen.frame,primaryTop:top)
+                    avoid.append(CGRect(x:human.x-16,y:human.y-16,width:32,height:32))
+                    if let area = at.rect { avoid.append(CGRect(origin: PointerGeometry.local(area.origin, screen: entry.screen.frame, primaryTop: top), size: area.size)) }
+                    let frame = mark.label(text, name: c["name"] as? String ?? "Andy", state: c["state"] as? String ?? "pointing", at: p, bounds: entry.view.bounds, occupied: avoid)
+                    occupied[i, default: []].append(frame)
+                }
+                if let r = at.rect, ["rect", "spotlight"].contains(kind), show {
+                    let origin = PointerGeometry.local(r.origin, screen: entry.screen.frame, primaryTop: top)
+                    let rect = CGRect(origin: origin, size: r.size).insetBy(dx: -4, dy: -4)
                     CATransaction.begin(); CATransaction.setDisableActions(true)
-                    mark.ring.path = CGPath(roundedRect: CGRect(x: o.x - 4, y: o.y - 4, width: r.width + 8, height: r.height + 8), cornerWidth: 8, cornerHeight: 8, transform: nil)
+                    mark.ring.path = CGPath(roundedRect: rect, cornerWidth: 8, cornerHeight: 8, transform: nil); mark.ring.opacity = 1
                     CATransaction.commit()
-                    mark.ring.opacity = 1
+                    if kind == "spotlight", entry.view.bounds.intersects(rect), t >= (spotlights[i]?.time ?? 0) { spotlights[i] = (t, rect) }
                 } else { mark.ring.opacity = 0 }
             }
         }
-        // quit after a quiet minute (idle cursors count as quiet); the daemon relaunches on the next point
-        let live = cursors.values.contains { now.timeIntervalSince1970 - ((($0["t"] as? NSNumber)?.doubleValue ?? 0) / 1000) < idle }
-        if !live { emptySince = emptySince ?? now; if now.timeIntervalSince(emptySince!) > 60 { NSApp.terminate(nil) } } else { emptySince = nil }
+        for (i, entry) in windows.enumerated() {
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            if let spot = spotlights[i] { let path = CGMutablePath(); path.addRect(entry.view.bounds); path.addRoundedRect(in: spot.rect, cornerWidth: 8, cornerHeight: 8); entry.shade.path = path; entry.shade.opacity = 1 }
+            else { entry.shade.opacity = 0 }
+            CATransaction.commit()
+        }
+        if hasPresence && presenceTimer == nil {
+            let timer = Timer(timeInterval:1.0/30,repeats:true) { [weak self] _ in
+                guard let self=self,self.readMouse() != self.lastMouse else{return}
+                self.tick(updateWindows:false)
+            }
+            RunLoop.main.add(timer,forMode:.common);presenceTimer=timer
+        } else if !hasPresence {presenceTimer?.invalidate();presenceTimer=nil}
+        if live.isEmpty { emptySince = emptySince ?? now; if now.timeIntervalSince(emptySince!) > 60 { NSApp.terminate(nil) } } else { emptySince = nil }
+    }
+    func applicationWillTerminate(_ n: Notification) {
+        presenceTimer?.invalidate(); watcher?.cancel(); if watcherFD >= 0 { close(watcherFD) }
+        try? fm.removeItem(atPath: "\(runDir)/pointer-windows.json")
     }
 }
 
-signal(SIGPIPE, SIG_IGN)
-let app = NSApplication.shared
-let pointerMode = CommandLine.arguments.contains("--pointer")
-let delegate: NSApplicationDelegate = pointerMode ? PointerOverlay() : AppDelegate()
-app.delegate = delegate
-app.run()
+#if !COMPANION_TEST
+@main struct PreviewMain {
+    static func main() {
+        signal(SIGPIPE, SIG_IGN)
+        let app = NSApplication.shared
+        let delegate: NSApplicationDelegate = CommandLine.arguments.contains("--pointer") ? PointerOverlay() : (CommandLine.arguments.contains("--companion") || Bundle.main.bundleIdentifier?.hasSuffix(".barista") == true) ? CompanionDelegate() : AppDelegate()
+        app.delegate = delegate
+        withExtendedLifetime(delegate) { app.run() }
+    }
+}
+#endif

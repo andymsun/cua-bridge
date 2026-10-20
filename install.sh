@@ -20,12 +20,12 @@ NODE="$(command -v node || true)"
 command -v npm >/dev/null || { echo "npm is required (it ships with Node.js)."; exit 1; }
 command -v swiftc >/dev/null || { echo "Xcode command line tools required: xcode-select --install"; exit 1; }
 
+echo "==> dependencies"
+( cd "$REPO" && npm install --omit=dev --no-audit --no-fund --silent ) && say "playwright-core (locators run on cua's own browser; no browser download)"
+
 echo "==> native apps"
 # Setup/trust is deliberately separate: installing must never silently create an identity.
 python3 "$REPO/scripts/build-native.py" --apps-dir "$APPS"
-
-echo "==> dependencies"
-( cd "$REPO" && npm install --omit=dev --no-audit --no-fund --silent ) && say "playwright-core (locators run on cua's own browser; no browser download)"
 
 echo "==> config"
 "$NODE" --input-type=module -e "import { ensureDirs, paths } from '$REPO/server/lib/config.mjs'; ensureDirs(); console.log('  ' + paths.config);"
@@ -88,6 +88,7 @@ cat <<'NEXT'
   ad-hoc build may require a new grant. Startup and doctor never request access.
   Keep the same signing identity and installation path on future upgrades.
 
+  Desktop companion: cua companion  (or open ~/Applications/AndyBarista.app)
   Settings UI: cua settings      Live browser: cua ui
   Switch agents to the harness's built-in browser and back: cua toggle
 NEXT

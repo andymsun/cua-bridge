@@ -370,6 +370,487 @@ func press(_ el: AXUIElement) throws {
     throw AgentError("Element does not accept a press. Available actions: \(acts.joined(separator: ", "))")
 }
 
+// MARK: - passive exact lookup
+
+struct LookupFailure: Error {
+    let status: String
+    let message: String
+    init(_ status: String, _ message: String) { self.status = status; self.message = message }
+}
+
+struct LookupQuery {
+    let pid: pid_t
+    let process: String
+    let windowID: CGWindowID?
+    let name: String
+    let role: String?
+
+    init(_ request: [String: Any]) throws {
+        func integer(_ key: String, _ upper: Double) throws -> UInt32 {
+            guard let n = request[key] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+                  n.doubleValue.isFinite, n.doubleValue.rounded() == n.doubleValue,
+                  n.doubleValue > 0, n.doubleValue <= upper else {
+                throw LookupFailure("unavailable", "Lookup needs a valid \(key).")
+            }
+            return n.uint32Value
+        }
+        let p = try integer("pid", Double(Int32.max))
+        guard p > 1, let identity = request["process"] as? String, identity.utf8.count <= 128,
+              identity.hasPrefix("\(p):"), let launch = Double(identity.dropFirst("\(p):".count)),
+              launch.isFinite, launch > 0 else {
+            throw LookupFailure("unavailable", "Lookup needs the running process's pid:launchDateSeconds identity.")
+        }
+        guard let name = request["name"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name.utf16.count <= 512 else {
+            throw LookupFailure("unavailable", "Lookup needs an exact name of 1 to 512 UTF-16 units.")
+        }
+        var role: String?
+        if let value = request["role"], !(value is NSNull) {
+            guard let r = value as? String, Set(ROLE_NAMES.values).union(["searchbox", "tab"]).contains(r) else {
+                throw LookupFailure("unavailable", "Use a supported native role such as button, textbox, or menuitem.")
+            }
+            role = r
+        }
+        self.pid = pid_t(p); self.process = identity; self.name = name; self.role = role
+        if let value = request["windowId"], !(value is NSNull) {
+            self.windowID = try integer("windowId", Double(UInt32.max))
+        } else { self.windowID = nil }
+    }
+}
+
+func lookupRole(_ raw: String, _ subrole: String?) -> String {
+    if subrole == "AXSearchField" { return "searchbox" }
+    if subrole == "AXTabButton" { return "tab" }
+    return ROLE_NAMES[raw] ?? raw.replacingOccurrences(of: "AX", with: "").lowercased()
+}
+
+struct LookupCandidate {
+    let name: String
+    let role: String
+    let pid: pid_t
+    let windowID: CGWindowID
+    let frame: CGRect
+    let enabled: Bool?
+    let secure: Bool
+    let hidden: Bool
+}
+
+struct LookupMatch: Equatable {
+    let name: String
+    let role: String
+    let windowID: CGWindowID
+    let rect: CGRect
+    var metadata: [String: Any] {
+        var result: [String: Any] = ["name": String(name.prefix(120)), "role": role, "windowId": Int(windowID)]
+        if name.count > 120 { result["nameTruncated"] = true }
+        return result
+    }
+}
+
+func lookupPositiveRect(_ rect: CGRect) -> Bool {
+    [rect.origin.x, rect.origin.y, rect.size.width, rect.size.height, rect.maxX, rect.maxY].allSatisfy { $0.isFinite }
+        && rect.size.width > 0 && rect.size.height > 0
+}
+
+func lookupMatch(_ candidate: LookupCandidate, query: LookupQuery, windowID: CGWindowID, window: CGRect,
+                 clips: [CGRect], displays: [CGRect], occluders: [CGRect]) throws -> LookupMatch? {
+    guard !candidate.secure, !candidate.hidden, candidate.enabled != false else { return nil }
+    guard query.role == nil || query.role == candidate.role else { return nil }
+    guard candidate.name.utf16.count <= 512 else {
+        throw LookupFailure("incomplete", "An accessibility name exceeds the lookup limit; uniqueness is unknown.")
+    }
+    guard candidate.name == query.name else { return nil }
+    guard candidate.pid == query.pid, candidate.windowID == windowID,
+          query.windowID == nil || query.windowID == windowID else {
+        throw LookupFailure("incomplete", "Target ownership or its selected window could not be verified.")
+    }
+    guard candidate.enabled == true else { throw LookupFailure("incomplete", "The exact target's enabled state is unavailable.") }
+    let frame = candidate.frame
+    guard lookupPositiveRect(frame), lookupPositiveRect(window), window.contains(frame),
+          clips.allSatisfy({ lookupPositiveRect($0) && $0.contains(frame) }),
+          displays.contains(where: { lookupPositiveRect($0) && $0.contains(frame) }) else { return nil }
+    // Window bounds are deliberately conservative, including transparent/irregular windows.
+    // AX hit tests below supplement this check; neither is a pixel-visibility guarantee.
+    guard !occluders.contains(where: { $0.intersects(frame) }) else {
+        throw LookupFailure("incomplete", "A higher window overlaps the exact target; visibility cannot be verified passively.")
+    }
+    return LookupMatch(name: candidate.name, role: candidate.role, windowID: windowID,
+                       rect: CGRect(x: (frame.minX - window.minX) / window.width, y: (frame.minY - window.minY) / window.height,
+                                    width: frame.width / window.width, height: frame.height / window.height))
+}
+
+func lookupResult(_ matches: [LookupMatch], incomplete: String?) -> [String: Any] {
+    if incomplete == nil, matches.count == 1, let match = matches.first {
+        return ["status": "matched", "name": match.name, "role": match.role, "windowId": Int(match.windowID),
+                "target": ["windowId": Int(match.windowID), "rect": ["x": Double(match.rect.minX), "y": Double(match.rect.minY),
+                                                                     "w": Double(match.rect.width), "h": Double(match.rect.height)]]]
+    }
+    let status = incomplete != nil ? "incomplete" : matches.isEmpty ? "not_found" : "ambiguous"
+    let message = incomplete ?? (matches.isEmpty ? "No visible, enabled exact match in the exposed window accessibility tree."
+                                                : "More than one visible exact match; specify a role or a more specific name.")
+    var result: [String: Any] = ["status": status, "message": String(message.prefix(240))]
+    if !matches.isEmpty { result["candidates"] = matches.prefix(8).map { $0.metadata } }
+    return result
+}
+
+// The snapshot helpers intentionally hide AX errors and truncate labels for display. Lookup
+// must retain those failures. All AX reads share a monotonic deadline and per-message timeout;
+// arrays are counted before copying, and no enabling/focusing/input helpers are called.
+final class LookupReader {
+    let deadline = ProcessInfo.processInfo.systemUptime + 1.5
+    let maxNodes = 2048
+    let maxDepth = 48
+    var visited = Set<AXUIElement>()
+
+    func checkTime() throws {
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            throw LookupFailure("incomplete", "Accessibility lookup reached its time limit; uniqueness is unknown.")
+        }
+    }
+    func prepare(_ element: AXUIElement) throws {
+        try checkTime()
+        var owner: pid_t = 0
+        // System-wide objects would change this helper's global timeout, including other commands.
+        guard AXUIElementGetPid(element, &owner) == .success, owner > 1 else {
+            throw LookupFailure("incomplete", "Bounded lookup requires an application-owned accessibility object.")
+        }
+        let timeout = Float(max(0.001, min(0.08, deadline - ProcessInfo.processInfo.systemUptime)))
+        guard AXUIElementSetMessagingTimeout(element, timeout) == .success else {
+            throw LookupFailure("incomplete", "Accessibility read timeout could not be bounded.")
+        }
+    }
+    func checked(_ error: AXError, optional: Bool = false) throws -> Bool {
+        try checkTime()
+        if error == .success { return true }
+        if optional && (error == .attributeUnsupported || error == .noValue) { return false }
+        throw LookupFailure(error == .apiDisabled ? "unavailable" : "incomplete",
+                            "Accessibility read failed (\(error.rawValue)); the search is not complete.")
+    }
+    func value(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
+        try prepare(element)
+        var value: CFTypeRef?
+        guard try checked(AXUIElementCopyAttributeValue(element, attribute as CFString, &value), optional: true) else { return nil }
+        guard let value = value else { throw LookupFailure("incomplete", "Accessibility returned an invalid attribute value.") }
+        return value
+    }
+    func string(_ element: AXUIElement, _ attribute: String) throws -> String? {
+        guard let value = try value(element, attribute) else { return nil }
+        if CFGetTypeID(value) == CFStringGetTypeID() {
+            guard CFStringGetLength((value as! CFString)) <= 512 else {
+                throw LookupFailure("incomplete", "An accessibility name exceeds the lookup limit; uniqueness is unknown.")
+            }
+            let text = value as! String
+            return text.isEmpty ? nil : text
+        }
+        if let number = value as? NSNumber { return number.stringValue }
+        throw LookupFailure("incomplete", "Accessibility returned a non-text name or role.")
+    }
+    func bool(_ element: AXUIElement, _ attribute: String) throws -> Bool? {
+        guard let value = try value(element, attribute) else { return nil }
+        guard let number = value as? NSNumber, number.doubleValue == 0 || number.doubleValue == 1 else {
+            throw LookupFailure("incomplete", "Accessibility returned an invalid visibility or enabled state.")
+        }
+        return number.boolValue
+    }
+    func element(_ element: AXUIElement, _ attribute: String) throws -> AXUIElement? {
+        guard let value = try value(element, attribute) else { return nil }
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw LookupFailure("incomplete", "Accessibility returned an invalid owner or parent.") }
+        return (value as! AXUIElement)
+    }
+    func elements(_ element: AXUIElement, _ attribute: String, limit: Int, optional: Bool = true) throws -> [AXUIElement] {
+        try prepare(element)
+        var count: CFIndex = 0
+        guard try checked(AXUIElementGetAttributeValueCount(element, attribute as CFString, &count), optional: optional) else { return [] }
+        guard count >= 0, count <= limit else { throw LookupFailure("incomplete", "Accessibility traversal limit reached; uniqueness is unknown.") }
+        if count == 0 { return [] }
+        try prepare(element)
+        var values: CFArray?
+        _ = try checked(AXUIElementCopyAttributeValues(element, attribute as CFString, 0, count, &values))
+        guard let array = values as? [AnyObject], array.count == count,
+              array.allSatisfy({ CFGetTypeID($0) == AXUIElementGetTypeID() }) else {
+            throw LookupFailure("incomplete", "Accessibility children changed or could not be fully read.")
+        }
+        try prepare(element)
+        var after: CFIndex = 0
+        _ = try checked(AXUIElementGetAttributeValueCount(element, attribute as CFString, &after))
+        guard after == count else { throw LookupFailure("incomplete", "Accessibility children changed during the search.") }
+        return array.map { $0 as! AXUIElement }
+    }
+    func frame(_ element: AXUIElement) throws -> CGRect? {
+        guard let position = try value(element, kAXPositionAttribute), let size = try value(element, kAXSizeAttribute) else { return nil }
+        guard CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else {
+            throw LookupFailure("incomplete", "Accessibility returned invalid geometry.")
+        }
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point), AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else {
+            throw LookupFailure("incomplete", "Accessibility geometry could not be read.")
+        }
+        return CGRect(origin: point, size: dimensions)
+    }
+    func pid(_ element: AXUIElement) throws -> pid_t {
+        try prepare(element)
+        var pid: pid_t = 0
+        _ = try checked(AXUIElementGetPid(element, &pid))
+        return pid
+    }
+    func windowID(_ window: AXUIElement) throws -> CGWindowID {
+        try prepare(window)
+        var id: CGWindowID = 0
+        _ = try checked(_AXUIElementGetWindow(window, &id))
+        guard id != 0 else { throw LookupFailure("incomplete", "Accessibility window identity is unavailable.") }
+        return id
+    }
+    func state(_ element: AXUIElement) throws -> (raw: String, role: String, secure: Bool, enabled: Bool?, hidden: Bool) {
+        guard let raw = try string(element, kAXRoleAttribute) else { throw LookupFailure("incomplete", "Accessibility role is unavailable.") }
+        let subrole = try string(element, kAXSubroleAttribute)
+        return (raw, lookupRole(raw, subrole), raw == "AXSecureTextField" || subrole == "AXSecureTextField",
+                try bool(element, kAXEnabledAttribute), try bool(element, "AXHidden") == true)
+    }
+    func name(_ element: AXUIElement, rawRole: String) throws -> String {
+        if rawRole == "AXStaticText", let text = try string(element, kAXValueAttribute) { return text }
+        for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, kAXPlaceholderValueAttribute] {
+            if let text = try string(element, attribute) { return text }
+        }
+        return ""
+    }
+    func ownedWindow(_ element: AXUIElement, window: AXUIElement, id: CGWindowID, pid: pid_t) throws {
+        guard try self.pid(element) == pid else { throw LookupFailure("incomplete", "Accessibility target belongs to a different process.") }
+        let owner = CFEqual(element, window) ? window : try self.element(element, kAXWindowAttribute)
+        guard let owner = owner, CFEqual(owner, window), try self.windowID(owner) == id else {
+            throw LookupFailure("incomplete", "Accessibility target's exact window ownership is unavailable.")
+        }
+    }
+    func hitTest(_ element: AXUIElement, frame: CGRect, pid: pid_t) throws {
+        // AX bounds can include a bezel outside the control's hit region. Verify the cursor anchor.
+        let application = appElement(pid)
+        try prepare(application)
+        var hit: AXUIElement?
+        _ = try checked(AXUIElementCopyElementAtPosition(application, Float(frame.midX), Float(frame.midY), &hit))
+        var seen = Set<AXUIElement>()
+        for _ in 0...maxDepth {
+            guard let current = hit, seen.insert(current).inserted, try self.pid(current) == pid else { break }
+            if CFEqual(current, element) { return }
+            hit = try self.element(current, kAXParentAttribute)
+        }
+        throw LookupFailure("incomplete", "The exact target's cursor anchor could not be verified by passive accessibility hit testing.")
+    }
+}
+
+func lookupOverlayWindowIDs(_ record: [String: Any], pid: pid_t, process: String, executable: String, trustedExecutable: String) -> Set<CGWindowID> {
+    guard executable == trustedExecutable, pid > 1,
+          let version = record["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(), version.doubleValue == 1,
+          let owner = record["pid"] as? NSNumber, CFGetTypeID(owner) != CFBooleanGetTypeID(), owner.doubleValue == Double(pid),
+          record["process"] as? String == process,
+          let values = record["windows"] as? [NSNumber], !values.isEmpty, values.count <= 16,
+          values.allSatisfy({ CFGetTypeID($0) != CFBooleanGetTypeID() && $0.doubleValue.isFinite && $0.doubleValue.rounded() == $0.doubleValue && $0.doubleValue > 0 && $0.doubleValue <= Double(UInt32.max) }) else { return [] }
+    let ids = Set(values.map { $0.uint32Value })
+    return ids.count == values.count ? ids : []
+}
+
+func lookupGuideOverlay() -> (pid: pid_t, windows: Set<CGWindowID>)? {
+    let fd = open("\(runDir)/pointer-windows.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    var info = stat()
+    guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+          info.st_uid == getuid(), info.st_mode & 0o077 == 0, info.st_size > 0, info.st_size <= 8192 else { return nil }
+    var bytes = [UInt8](repeating: 0, count: Int(info.st_size))
+    let count = bytes.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+    guard count == bytes.count, let record = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any],
+          let owner = record["pid"] as? NSNumber, owner.doubleValue > 1, owner.doubleValue <= Double(Int32.max),
+          let identity = try? processIdentity(owner.int32Value),
+          let actual = NSRunningApplication(processIdentifier: owner.int32Value)?.executableURL else { return nil }
+    let app = ProcessInfo.processInfo.environment["CUA_HUD_APP"].map { URL(fileURLWithPath: $0) }
+        ?? Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("CuaPreview.app")
+    let trusted = app.appendingPathComponent("Contents/MacOS/CuaPreview").resolvingSymlinksInPath().standardizedFileURL.path
+    let ids = lookupOverlayWindowIDs(record, pid: owner.int32Value, process: identity,
+                                    executable: actual.resolvingSymlinksInPath().standardizedFileURL.path, trustedExecutable: trusted)
+    return ids.isEmpty ? nil : (owner.int32Value, ids)
+}
+
+func lookupIsGuideWindow(_ info: [String: Any], overlay: (pid: pid_t, windows: Set<CGWindowID>)?) -> Bool {
+    guard let overlay = overlay, (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == overlay.pid,
+          (info[kCGWindowLayer as String] as? NSNumber)?.intValue == Int(CGWindowLevelForKey(.screenSaverWindow)),
+          let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { return false }
+    return overlay.windows.contains(id)
+}
+
+func lookupVisibility(_ reader: LookupReader, pid: pid_t, windowID: CGWindowID, frame: CGRect) throws -> (displays: [CGRect], occluders: [CGRect]) {
+    try reader.checkTime()
+    guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+          windows.count <= 512 else { throw LookupFailure("incomplete", "Visible window metadata is unavailable or exceeds the lookup limit.") }
+    guard let index = windows.firstIndex(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
+          (windows[index][kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid else {
+        throw LookupFailure("unavailable", "The selected window is not on the current visible desktop or its ownership changed.")
+    }
+    func bounds(_ info: [String: Any]) throws -> CGRect {
+        guard let data = info[kCGWindowBounds as String] as? NSDictionary,
+              let rect = CGRect(dictionaryRepresentation: data as CFDictionary), lookupPositiveRect(rect) else {
+            throw LookupFailure("incomplete", "Visible window bounds are unavailable.")
+        }
+        return rect
+    }
+    guard let alpha = windows[index][kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue > 0,
+          try bounds(windows[index]) == frame else { throw LookupFailure("incomplete", "Selected window visibility or geometry changed.") }
+    var occluders: [CGRect] = []
+    let overlay = lookupGuideOverlay()
+    for info in windows.prefix(index) {
+        // Our guide marks are output, not document occlusion. Other local windows remain blockers.
+        if lookupIsGuideWindow(info, overlay: overlay) { continue }
+        guard let alpha = info[kCGWindowAlpha as String] as? NSNumber, alpha.doubleValue.isFinite else {
+            throw LookupFailure("incomplete", "A higher window's visibility is unavailable.")
+        }
+        if alpha.doubleValue > 0 { occluders.append(try bounds(info)) }
+    }
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0, count <= 16 else {
+        throw LookupFailure("unavailable", "Active display geometry is unavailable.")
+    }
+    var displays = [CGDirectDisplayID](repeating: 0, count: Int(count)), actual: UInt32 = 0
+    guard CGGetActiveDisplayList(count, &displays, &actual) == .success, actual == count else {
+        throw LookupFailure("incomplete", "Active displays changed during lookup.")
+    }
+    try reader.checkTime()
+    return (displays.map { CGDisplayBounds($0) }, occluders)
+}
+
+func lookup(_ request: [String: Any]) -> [String: Any] {
+    var matches: [LookupMatch] = []
+    do {
+        let query = try LookupQuery(request), reader = LookupReader()
+        func preflight() throws {
+            guard AXIsProcessTrusted() else { throw LookupFailure("unavailable", "Accessibility permission is not granted; lookup never requests it.") }
+            guard CGSessionCopyCurrentDictionary() != nil else { throw LookupFailure("unavailable", "The current login/lock state is unavailable.") }
+            try requireUnlocked()
+            try checkProcess(query.pid, query.process)
+            guard NSRunningApplication(processIdentifier: query.pid)?.isHidden == false else {
+                throw LookupFailure("unavailable", "The target application is hidden or no longer running.")
+            }
+            try reader.checkTime()
+        }
+        try preflight()
+        let app = appElement(query.pid)
+        let windows = try reader.elements(app, kAXWindowsAttribute, limit: 64, optional: false)
+        if windows.isEmpty {
+            try preflight()
+            if query.windowID != nil { throw LookupFailure("unavailable", "The exact selected window is no longer available.") }
+            return lookupResult([], incomplete: nil)
+        }
+        if query.windowID == nil && windows.count != 1 {
+            let ids = try windows.prefix(8).map { ["windowId": Int(try reader.windowID($0))] }
+            try preflight()
+            return ["status": "ambiguous", "message": "Choose an exact windowId; the running application has multiple windows.", "candidates": ids]
+        }
+        var selected: AXUIElement?
+        for window in windows {
+            if try query.windowID == nil || reader.windowID(window) == query.windowID { selected = window; break }
+        }
+        guard let window = selected else { throw LookupFailure("unavailable", "The exact selected window is no longer available.") }
+        let id = try reader.windowID(window)
+        try reader.ownedWindow(window, window: window, id: id, pid: query.pid)
+        guard try reader.bool(window, kAXMinimizedAttribute) == false, let frame = try reader.frame(window), lookupPositiveRect(frame) else {
+            throw LookupFailure("unavailable", "The selected window is minimized or has no usable visible frame.")
+        }
+        var visibility = try lookupVisibility(reader, pid: query.pid, windowID: id, frame: frame)
+        var elements: [AXUIElement] = []
+        func walk(_ element: AXUIElement, depth: Int, ancestors: Set<AXUIElement>, clips: [CGRect]) throws {
+            try reader.checkTime()
+            guard depth <= reader.maxDepth, !ancestors.contains(element) else { throw LookupFailure("incomplete", "Accessibility depth limit or a cyclic tree prevents a complete search.") }
+            guard !reader.visited.contains(element) else { throw LookupFailure("incomplete", "Accessibility returned a shared subtree; unique visible ancestry is unknown.") }
+            guard reader.visited.count < reader.maxNodes else { throw LookupFailure("incomplete", "Accessibility node limit reached; uniqueness is unknown.") }
+            reader.visited.insert(element)
+            guard try reader.pid(element) == query.pid else { throw LookupFailure("incomplete", "Accessibility subtree ownership could not be verified.") }
+            let state = try reader.state(element)
+            if state.secure || state.hidden || state.enabled == false { return }
+            let name = query.role == nil || query.role == state.role ? try reader.name(element, rawRole: state.raw) : ""
+            let bounds = try reader.frame(element)
+            if name == query.name {
+                try reader.ownedWindow(element, window: window, id: id, pid: query.pid)
+                let candidate = LookupCandidate(name: name, role: state.role, pid: query.pid, windowID: id, frame: bounds ?? .zero,
+                                                enabled: state.enabled, secure: state.secure, hidden: state.hidden)
+                if let match = try lookupMatch(candidate, query: query, windowID: id, window: frame, clips: clips,
+                                               displays: visibility.displays, occluders: visibility.occluders) {
+                    matches.append(match); elements.append(element)
+                }
+            }
+            let children = try reader.elements(element, kAXChildrenAttribute, limit: reader.maxNodes)
+            if depth == 0 && children.isEmpty { throw LookupFailure("incomplete", "The window does not expose a searchable accessibility tree.") }
+            var childClips = clips
+            if let bounds = bounds { childClips.append(bounds) }
+            else if ["AXScrollArea", "AXWebArea"].contains(state.raw) && !children.isEmpty {
+                throw LookupFailure("incomplete", "Viewport visibility is unavailable.")
+            }
+            var path = ancestors; path.insert(element)
+            for child in children { try walk(child, depth: depth + 1, ancestors: path, clips: childClips) }
+        }
+        try walk(window, depth: 0, ancestors: [], clips: [])
+        try preflight()
+        let currentWindows = try reader.elements(app, kAXWindowsAttribute, limit: 64, optional: false)
+        guard (query.windowID != nil || currentWindows.count == 1), currentWindows.contains(where: { CFEqual($0, window) }),
+              try reader.windowID(window) == id, try reader.frame(window) == frame,
+              try reader.bool(window, kAXMinimizedAttribute) == false else {
+            throw LookupFailure("incomplete", "The selected window changed during lookup.")
+        }
+        visibility = try lookupVisibility(reader, pid: query.pid, windowID: id, frame: frame)
+        // Re-read each result and its current parent chain; cached snapshots/old parents cannot
+        // authorize a match. Secure parents are never read for names or values.
+        for (index, element) in elements.enumerated() {
+            var parent: AXUIElement? = element, chain = Set<AXUIElement>(), clips: [CGRect] = []
+            var reachedWindow = false
+            while let current = parent, chain.count <= reader.maxDepth {
+                guard chain.insert(current).inserted, try reader.pid(current) == query.pid else { break }
+                let state = try reader.state(current)
+                guard !state.secure, !state.hidden, state.enabled != false else { throw LookupFailure("incomplete", "Target or parent became secure, hidden, or disabled.") }
+                if !CFEqual(current, element) {
+                    if let rect = try reader.frame(current) { clips.append(rect) }
+                    else if ["AXScrollArea", "AXWebArea"].contains(state.raw) {
+                        throw LookupFailure("incomplete", "Target's current viewport visibility is unavailable.")
+                    }
+                }
+                if CFEqual(current, window) { reachedWindow = true; break }
+                parent = try reader.element(current, kAXParentAttribute)
+            }
+            guard reachedWindow else { throw LookupFailure("incomplete", "Target's current ancestry cannot be verified.") }
+            try reader.ownedWindow(element, window: window, id: id, pid: query.pid)
+            let state = try reader.state(element)
+            guard !state.secure, !state.hidden, state.enabled != false else {
+                throw LookupFailure("incomplete", "Target became secure, hidden, or disabled during validation.")
+            }
+            let name = try reader.name(element, rawRole: state.raw)
+            let bounds = try reader.frame(element) ?? .zero
+            let candidate = LookupCandidate(name: name, role: state.role, pid: query.pid, windowID: id, frame: bounds,
+                                            enabled: state.enabled, secure: state.secure, hidden: state.hidden)
+            guard let fresh = try lookupMatch(candidate, query: query, windowID: id, window: frame, clips: clips,
+                                               displays: visibility.displays, occluders: visibility.occluders), fresh == matches[index] else {
+                throw LookupFailure("incomplete", "An exact target changed during lookup; retry with fresh context.")
+            }
+            try reader.hitTest(element, frame: bounds, pid: query.pid)
+        }
+        try preflight()
+        guard try reader.frame(window) == frame, try reader.bool(window, kAXMinimizedAttribute) == false else {
+            throw LookupFailure("incomplete", "Window geometry or visibility changed during target validation.")
+        }
+        let finalVisibility = try lookupVisibility(reader, pid: query.pid, windowID: id, frame: frame)
+        for match in matches {
+            let rect = CGRect(x: frame.minX + match.rect.minX * frame.width, y: frame.minY + match.rect.minY * frame.height,
+                              width: match.rect.width * frame.width, height: match.rect.height * frame.height)
+            guard finalVisibility.displays.contains(where: { $0.contains(rect) }),
+                  !finalVisibility.occluders.contains(where: { $0.intersects(rect) }) else {
+                throw LookupFailure("incomplete", "Target visibility changed during validation.")
+            }
+        }
+        try reader.checkTime()
+        return lookupResult(matches, incomplete: nil)
+    } catch let failure as LookupFailure {
+        if failure.status == "incomplete" { return lookupResult(matches, incomplete: failure.message) }
+        return ["status": failure.status, "message": String(failure.message.prefix(240))]
+    } catch let error as AgentError {
+        return ["status": "unavailable", "message": String(error.message.prefix(240))]
+    } catch {
+        return ["status": "incomplete", "message": "Accessibility lookup could not be completed."]
+    }
+}
+
 // MARK: - process-targeted keyboard events (never global)
 
 let KEYCODES: [String: CGKeyCode] = [
@@ -474,9 +955,9 @@ func drag(pid: pid_t, window: CGWindowID?, from a: CGPoint, to b: CGPoint) {
 
 // MARK: - apps
 
-func runningApps() -> [[String: Any]] {
+func runningApps(includeAccessories: Bool = false) -> [[String: Any]] {
     NSWorkspace.shared.runningApplications
-        .filter { $0.activationPolicy == .regular }
+        .filter { $0.activationPolicy == .regular || includeAccessories && $0.activationPolicy == .accessory }
         .map { ["name": $0.localizedName ?? "", "bundleId": $0.bundleIdentifier ?? "", "pid": Int($0.processIdentifier), "active": $0.isActive, "process": (try? processIdentity($0.processIdentifier)) ?? ""] }
 }
 
@@ -607,6 +1088,7 @@ func viewMetadata(_ id: String) -> String { "\(runDir)/view-\(id).json" }
 
 func handle(_ req: [String: Any]) throws -> Any {
     let cmd = req["cmd"] as? String ?? ""
+    if cmd == "lookup" { return lookup(req) }
     for key in ["pid", "windowId", "index", "count", "pages", "maxDepth"] {
         if let value = req[key], !(value is NSNull) {
             guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
@@ -670,7 +1152,7 @@ func handle(_ req: [String: Any]) throws -> Any {
     case "releaseSnapshot":
         if let gen = gen { tables.removeValue(forKey: gen) }
         return ["released": true]
-    case "apps": return runningApps()
+    case "apps": return runningApps(includeAccessories: req["includeAccessories"] as? Bool == true)
     case "resolve": return try resolve(req["query"] as? String ?? "")
     case "windows": return try windows(try needPid())
     case "snapshot": return try snapshot(pid: try needPid(), window: targetWindow, maxDepth: min(60, max(1, (req["maxDepth"] as? NSNumber)?.intValue ?? 30)))

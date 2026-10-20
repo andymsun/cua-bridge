@@ -1,7 +1,7 @@
 // Local web UI: the live built-in browser (Codex-style in-app browser you can open
 // in any browser pane - including the Claude app's) and the settings page.
 // Bound to 127.0.0.1 and gated by a per-install token.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
@@ -16,7 +16,12 @@ const SEARCH = { google: "https://www.google.com/search?q=%s", bing: "https://ww
 const searchUrl = (e) => SEARCH[e] ?? (/^https?:\/\/[^"<>\s]+%s/.test(String(e)) ? e : SEARCH.google);
 const safeColor = (c) => (/^#[0-9a-f]{3,8}$|^[a-z]+$/i.test(String(c)) ? c : "#339cff");
 
-export function startWeb({ engine, native, hud, token, status }) {
+export function startWeb({ engine, native, hud, token, status, companion, agentHub }) {
+  const instance = randomUUID();
+  let revision = 0;
+  const changed = () => { revision++; };
+  companion?.on("change", changed); agentHub?.on("change", changed);
+  const companionState = () => ({ ...companion.snapshot(), ...(agentHub ? { hub: agentHub.snapshot() } : {}), version: { instance, revision } });
   const viewers = new Set();      // MJPEG responses
   const sockets = new Set();      // WebSocket live-view clients
   const listeners = new Set();    // SSE responses
@@ -37,7 +42,51 @@ export function startWeb({ engine, native, hud, token, status }) {
     const url = new URL(req.url, "http://x");
     if (!authed(req, url)) { res.writeHead(401); return res.end("Missing or wrong token. Open the URL from cua.ui() or the settings command."); }
     try {
+      if (url.pathname.startsWith("/api/companion")) {
+        res.setHeader("cache-control", "no-store");
+        if (req.method === "GET" && url.pathname === "/api/companion/events") {
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+          const write = () => res.write(`data: ${JSON.stringify(companionState())}\n\n`);
+          write(); companion.on("change", write); agentHub?.on("change", write);
+          const heartbeat = setInterval(() => res.write(": keepalive\n\n"), 20000);
+          const end = () => res.end(); companion.once("close", end);
+          res.once("close", () => {
+            clearInterval(heartbeat); companion.off("change", write); companion.off("close", end); agentHub?.off("change", write);
+          }); return;
+        }
+        if (req.method === "GET") return json(res, 200, companionState());
+        if (req.method !== "POST" || !req.headers["content-type"]?.startsWith("application/json")) return json(res, 415, { error: "Send JSON" });
+        const origin = req.headers.origin;
+        if (origin && origin !== `http://${req.headers.host}`) return json(res, 403, { error: "Wrong origin" });
+        let raw = "";
+        for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 32768) return json(res, 413, { error: "Request too large" }); }
+        const data = JSON.parse(raw || "{}");
+        switch (url.pathname) {
+          case "/api/companion/permissions": {
+            if (data.permission !== "accessibility") return json(res, 400, { error: "Only app accessibility is needed by this companion" });
+            const permission = await native.req("requestPermission", { permission: "accessibility" });
+            return json(res, 200, { ...companionState(), permission });
+          }
+          case "/api/companion/new": { const s = companion.create(data); return json(res, 200, { id: s.id, ...companionState() }); }
+          case "/api/companion/send": companion.send(data.id, data); break;
+          case "/api/companion/stop": companion.stop(data.id); break;
+          case "/api/companion/stop-all": for (const s of companion.sessions.values()) companion.stop(s.id); break;
+          case "/api/companion/remove": companion.remove(data.id); break;
+          case "/api/companion/warm": companion.warm(); break;
+          case "/api/companion/demo": companion.demo(data); break;
+          case "/api/companion/demo-stop": companion.stopDemo(); break;
+          case "/api/companion/annotate": companion.annotate(data.id, data.shape); break;
+          case "/api/companion/select": companion.select(data.id, data.rect, data.style); break;
+          case "/api/companion/clear": companion.clear(data.id); break;
+          case "/api/companion/approve": await companion.approve(data.id, data.approvalId, data.allow); break;
+          default: return json(res, 404, { error: "Unknown companion command" });
+        }
+        return json(res, 200, companionState());
+      }
       switch (`${req.method} ${url.pathname}`) {
+        case "GET /companion":
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer", "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'" });
+          return res.end(page("companion.html").replaceAll("{{TOKEN}}", token));
         case "GET /":
           res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
           return res.end(page("browser.html").replaceAll("{{TOKEN}}", token).replaceAll("{{CURSOR_COLOR}}", safeColor(config().hud.cursorColor))
@@ -181,6 +230,8 @@ export function startWeb({ engine, native, hud, token, status }) {
     res.write(`Content-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
     res.write(buf); res.write("\r\n--f\r\n");
   };
+
+  server.once("close", () => { companion?.off("change", changed); agentHub?.off("change", changed); });
 
   return {
     server,

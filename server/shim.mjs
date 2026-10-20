@@ -15,26 +15,42 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SESSION = randomUUID();
 const HOST = hostInfo();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let closing = false, clientInfo = {}, registration = null;
 
 function post(route, body, timeoutMs = 600000) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body ?? {});
     const req = http.request({ socketPath: paths.daemonSock, path: route, method: "POST",
       headers: { "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
-      let b = ""; res.on("data", (c) => (b += c)); res.on("end", () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+      let b = ""; res.setEncoding("utf8"); res.on("data", (c) => (b += c));
+      res.on("end", () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+      res.on("error", reject);
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error("daemon request timed out")));
+    const timer = setTimeout(() => req.destroy(new Error("daemon request timed out")), timeoutMs);
+    req.once("close", () => clearTimeout(timer));
     req.on("error", reject);
     req.end(data);
   });
 }
 
+function register() {
+  if (closing) return Promise.resolve(false);
+  if (!registration) registration = post("/agent/register", { session: SESSION, client: clientInfo, host: HOST }, 750)
+    .then(result => result.ok === true).catch(() => false).finally(() => { registration = null; });
+  return registration;
+}
+
 async function ensureDaemon() {
+  if (closing) return;
   try { await post("/health", {}, 2000); return; } catch {}
+  if (closing) return;
   ensureDirs();
   const out = fs.openSync(paths.log, "a");
   spawn(process.execPath, [path.join(here, "daemon.mjs")], { detached: true, stdio: ["ignore", out, out] }).unref();
-  for (let i = 0; i < 50; i++) { await sleep(100); try { await post("/health", {}, 1000); return; } catch {} }
+  for (let i = 0; i < 50; i++) {
+    await sleep(100); if (closing) return;
+    try { await post("/health", {}, 1000); return; } catch {}
+  }
   throw new Error(`cua daemon failed to start; see ${paths.log}`);
 }
 
@@ -60,24 +76,31 @@ const TOOLS = [
   },
 ];
 
-const send = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
+const send = (msg) => { if (!closing) process.stdout.write(JSON.stringify(msg) + "\n"); };
 
 async function handle(msg) {
   const { id, method, params } = msg;
-  if (id === undefined) return;                       // notification
+  if (closing || id === undefined) return;            // notification or closed transport
   try {
     if (method === "initialize") {
-      return send({ jsonrpc: "2.0", id, result: {
+      const field = value => typeof value === "string" ? value.slice(0, 80) : "";
+      clientInfo = { name: field(params?.clientInfo?.name), version: field(params?.clientInfo?.version) };
+      send({ jsonrpc: "2.0", id, result: {
         protocolVersion: params?.protocolVersion ?? "2025-06-18",
         capabilities: { tools: {} },
         serverInfo: { name: "cua", version: "2.0.0" },
         instructions: "Background browser and computer use through one persistent `js` tool. Your cursor-free, window-free control surface: see the js tool description.",
       } });
+      void register();
+      return;
     }
     if (method === "ping") return send({ jsonrpc: "2.0", id, result: {} });
     if (method === "tools/list") return send({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
     if (method === "tools/call") {
       await ensureDaemon();
+      if (closing) return;
+      await register();
+      if (closing) return;
       if (params.name === "js_reset") {
         await post("/reset", { session: SESSION });
         return send({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "session reset" }] } });
@@ -96,6 +119,7 @@ async function handle(msg) {
 }
 
 let buf = "";
+process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => {
   buf += d;
   let i;
@@ -105,6 +129,12 @@ process.stdin.on("data", (d) => {
   }
 });
 // End this session's REPL and cursor however the harness stops us: closed stdin or a signal.
-const end = async () => { try { await post("/end", { session: SESSION }, 2000); } catch {} process.exit(0); };
+const end = async () => {
+  if (closing) return;
+  closing = true;
+  await registration;
+  try { await post("/end", { session: SESSION }, 2000); } catch {}
+  process.exit(0);
+};
 process.stdin.on("end", end);
 for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(signal, end);

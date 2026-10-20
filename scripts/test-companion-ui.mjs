@@ -1,0 +1,201 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { chromium } from "playwright-core";
+
+const dir=fs.mkdtempSync(path.join(process.argv[2]??os.tmpdir(),"barista-ui-"));
+process.env.CUA_RUN_DIR=dir;process.env.CUA_CONFIG=path.join(dir,"config.json");process.env.CUA_HUD_APP=path.join(dir,"missing.app");
+const fixture=path.join(dir,"fixture.mjs");
+fs.writeFileSync(fixture,`let prompt='';process.stdin.on('data',c=>prompt+=c);process.stdin.on('end',()=>{if(prompt.includes('WAIT')){setInterval(()=>{},1000);return}console.log(JSON.stringify({type:'result',is_error:false,result:'Fixture response: request received.'}))});`);
+fs.writeFileSync(process.env.CUA_CONFIG,JSON.stringify({web:{port:0},companion:{command:process.execPath,args:[fixture]}}));
+const {Pointers}=await import("../server/lib/pointer.mjs");
+const {Companion}=await import("../server/lib/companion.mjs");
+const {startWeb}=await import("../server/lib/web.mjs");
+const {findExecutable}=await import("../server/lib/browser.mjs");
+const pointers=new Pointers(),companion=new Companion({pointers,native:{}});
+let warmCalls=0;const warm=pointers.warm.bind(pointers);pointers.warm=()=>{warmCalls++;return warm()};
+const web=startWeb({engine:{running:false},native:{},hud:{},token:"test-token",status:async()=>({}),companion});
+const {port}=await web.listen(),origin=`http://127.0.0.1:${port}`;
+const browser=await chromium.launch({executablePath:findExecutable(),headless:true});
+const page=await browser.newPage({viewport:{width:360,height:700},colorScheme:"light",reducedMotion:"reduce"});
+const errors=[];page.on('pageerror',e=>errors.push(e.message));
+async function run(command,args){await new Promise((resolve,reject)=>{const child=spawn(command,args,{stdio:'inherit'});child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(new Error(command+' exited '+code)))})}
+try{
+ assert.equal((await fetch(origin+'/api/companion')).status,401);
+ assert.equal((await fetch(origin+'/api/companion/new?t=test-token',{method:'POST',headers:{'content-type':'application/json',origin:'https://untrusted.example'},body:'{}'})).status,403);
+ await page.goto(origin+'/companion?t=test-token');await page.waitForFunction(()=>online);
+ assert.deepEqual(await page.evaluate(()=>{
+  const input=$('prompt');input.focus();
+  return [new KeyboardEvent('keydown',{key:'Escape',isComposing:true,bubbles:true,cancelable:true}),new KeyboardEvent('keydown',{key:'Enter',keyCode:229,bubbles:true,cancelable:true}),new KeyboardEvent('keydown',{key:'Enter',shiftKey:true,bubbles:true,cancelable:true})].map(event=>{input.dispatchEvent(event);return event.defaultPrevented});
+ }),[false,false,false],'IME Escape/Enter and Shift-Enter stay with the editor');
+ assert.ok((await page.locator('#app').boundingBox()).height<=180,'idle popup does not become a chat window');
+ assert.equal(await page.locator('#answer').isVisible(),false);
+ await page.locator('#app').screenshot({path:path.join(dir,'popup-light.png')});
+ await page.route('**/api/companion/new',async route=>{
+  const response=await route.fetch();await page.waitForFunction(()=>state.sessions.length===1);await route.fulfill({response});
+ });
+ const firstSend=await page.evaluate(async()=>{setDraft('First question without a pre-created session');return submit()});
+ assert.equal(firstSend,true,'implicit session creation preserves the draft when SSE arrives before POST');
+ await page.waitForFunction(()=>current()?.status==='done');
+ assert.equal(companion.snapshot().sessions[0].messages[0].text,'First question without a pre-created session');
+ await page.evaluate(async()=>render(await api('/remove',{id:active})));await page.unroute('**/api/companion/new');
+ await page.getByRole('button',{name:'History and settings',exact:true}).click();
+ await page.getByRole('button',{name:'New',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#sessionChoice').options.length===1);
+ await page.getByText('Place an area by coordinates',{exact:true}).click();await page.locator('#areaX').fill('-1200');
+ await page.getByRole('button',{name:'Show area',exact:true}).click();await page.locator('#area').waitFor({state:'visible'});
+ assert.deepEqual(Object.values(pointers.snapshot().cursors)[0].target.screenRect,{x:-1200,y:100,w:300,h:180});
+ await page.getByRole('button',{name:'Spotlight',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('#areaStyle').getAttribute('aria-pressed')==='true');
+ await new Promise(r=>setTimeout(r,40));assert.equal(Object.values(pointers.snapshot().cursors)[0].kind,'spotlight');
+ await page.getByRole('button',{name:'History and settings',exact:true}).click();
+ await page.locator('#prompt').fill('<img src=x onerror="window.injected=true">');await page.getByRole('button',{name:'Send question',exact:true}).click();
+ await page.locator('#answer').getByText('Fixture response: request received.',{exact:true}).waitFor();
+ assert.equal(await page.evaluate(()=>window.injected),undefined);assert.equal(await page.locator('#answer img').count(),0);
+ await page.getByRole('button',{name:'Clear selected area',exact:true}).click();await page.locator('#area').waitFor({state:'hidden'});assert.deepEqual(pointers.snapshot().cursors,{});
+ await page.setViewportSize({width:320,height:700});await page.emulateMedia({colorScheme:'dark'});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+ await page.locator('#app').screenshot({path:path.join(dir,'popup-dark.png')});
+ await page.locator('#prompt').fill('WAIT');await page.getByRole('button',{name:'Send question',exact:true}).click();
+ await page.locator('#stop').waitFor({state:'visible'});await page.keyboard.press('Escape');
+ assert.equal(companion.snapshot().sessions[0].status,'thinking','Escape dismisses without cancelling the turn');
+ if(process.argv.includes('--native')){
+  const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),exe=path.join(dir,'popup-check');
+  const hubSource=process.env.CUA_HUB_TEST_SOURCE||path.join(root,'hud/CompanionHub.swift');
+  await run('swiftc',['-D','COMPANION_TEST','-swift-version','5',...['hud/CuaPreview.swift','hud/Companion.swift','hud/CompanionComposer.swift','hud/PointerGeometry.swift','hud/CompanionVoice.swift','scripts/test-popup.swift'].map(p=>path.join(root,p)),hubSource,'-o',exe]);
+  await run(exe,[]);
+  const editor=path.join(dir,'composer-check');
+  await run('swiftc',['-swift-version','5',path.join(root,'hud/CompanionComposer.swift'),path.join(root,'scripts/test-composer.swift'),'-o',editor]);await run(editor,[]);
+  assert.equal(companion.snapshot().sessions[0].status,'thinking','headless native checks leave the active fixture turn untouched');
+ }
+ await page.getByRole('button',{name:'Stop',exact:true}).click();await page.locator('#stop').waitFor({state:'hidden'});
+ assert.equal(companion.snapshot().sessions[0].status,'stopped');
+ const voicePage=await browser.newPage();voicePage.on('pageerror',e=>errors.push(e.message));
+ const sent=[];voicePage.on('request',r=>{if(r.url().endsWith('/api/companion/send'))sent.push(r.postDataJSON())});
+ await voicePage.addInitScript(()=>{window.nativeMessages=[];window.webkit={messageHandlers:{barista:{postMessage:message=>window.nativeMessages.push(message)}}}});
+ await voicePage.goto(origin+'/companion?t=test-token');await voicePage.waitForFunction(()=>online);
+ await voicePage.evaluate(()=>baristaOpened());assert.equal(warmCalls,1,'opening the native composer prepares its pointer overlay without inference');
+ assert.equal(await voicePage.evaluate(()=>['baristaNativeDraft','baristaNativeSubmit','baristaNativeSession','baristaNativeStop','baristaNativeAdvanced','baristaNativeVoicePrepare'].every(key=>typeof window[key]==='function')),true,'native controls have dedicated callbacks');
+ const ids=await voicePage.evaluate(async()=>{await makeSession(true);const a=active;await makeSession(true);return [a,active]});
+ await voicePage.evaluate(()=>{nativeMessages=[];voiceReply=active;return baristaNativeSession({id:null})});
+ assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='silence').length),1,'a new conversation stops the previous conversation’s speech');
+ assert.equal(await voicePage.evaluate(()=>voiceReply),null);
+ const [a,b]=ids;
+ await voicePage.evaluate(({a})=>baristaNativeSession({id:a}),{a});
+ await voicePage.evaluate(({a})=>baristaNativeDraft({id:a,text:'Keep draft',edit:1}),{a});
+ await voicePage.evaluate(async()=>{nativeMessages=[];await startTalk();$('talk').dispatchEvent(new PointerEvent('pointercancel'))});
+ await voicePage.waitForFunction(()=>nativeMessages.filter(m=>m.action.startsWith('voice')).length===2);
+ assert.deepEqual(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action.startsWith('voice')).map(m=>m.action)),['voiceStart','voiceCancel'],'a cancelled gesture never sends a phrase');
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'Keep draft');
+ await voicePage.evaluate(async({a,b})=>{
+  await baristaNativeVoicePrepare({id:a,captureID:'old-capture',route:'command'});
+  baristaVoiceState({captureID:'old-capture',phase:'permission'});
+  baristaVoiceText({captureID:'old-capture',text:'partial phrase'});
+  await baristaNativeSession({id:b});
+  baristaNativeDraft({id:b,text:'Other draft',edit:2});
+  await baristaVoiceFinal({captureID:'old-capture',text:'Never redirect this'});
+ },{a,b});
+ assert.equal(companion.get(a).messages.length,0);assert.equal(companion.get(b).messages.length,0,'a changed destination cancels the captured phrase');
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'Other draft');
+ await voicePage.evaluate(async({a})=>{
+  await baristaNativeSession({id:a});await baristaNativeVoicePrepare({id:a,captureID:'dictation',route:'dictation'});
+  baristaVoiceState({captureID:'dictation',phase:'permission'});
+  baristaVoiceText({captureID:'old-capture',text:'late stale text'});
+  await baristaVoiceFinal({captureID:'dictation',text:'added words'});
+ },{a});
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'Keep draft added words','dictation appends without submitting');
+ assert.equal(companion.get(a).messages.length,0);
+ assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='composerState').at(-1).edit),1,'dictation never acknowledges a native edit it has not received');
+ await voicePage.evaluate(async({a})=>{
+  await baristaNativeVoicePrepare({id:a,captureID:'edit-cancel',route:'dictation'});
+  baristaNativeDraft({id:a,text:'New typed draft',edit:3});
+  await baristaVoiceFinal({captureID:'edit-cancel',text:'must not overwrite typing'});
+ },{a});
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','new typing invalidates capture generation');
+ await voicePage.evaluate(async({a})=>{
+  baristaContext({pid:42,process:'42:1234.5',windowId:71,app:'Fixture',bundleId:'example.fixture',cursorOrigin:{x:-1200.25,y:240.25}});
+  await baristaNativeVoicePrepare({id:a,captureID:'command',route:'command'});
+  baristaContext({pid:99,process:'99:5678',windowId:90,app:'Other'});
+  baristaVoiceState({captureID:'command',phase:'permission'});
+  baristaVoiceText({captureID:'command',text:'A spoken request'});
+  baristaVoiceState({captureID:'command',phase:'idle'});
+  await baristaVoiceFinal({captureID:'command',text:'A spoken request'});
+  await baristaVoiceFinal({captureID:'command',text:'A duplicate final'});
+ },{a});
+ await voicePage.waitForFunction(()=>current()?.status==='done'&&current()?.messages.length===2);
+ assert.deepEqual(companion.get(a).messages.filter(m=>m.role==='user').map(m=>m.text),['A spoken request']);
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','command does not consume typed draft');
+ assert.deepEqual(sent.find(r=>r.prompt==='A spoken request').context,{pid:42,process:'42:1234.5',windowId:71,app:'Fixture',bundleId:'example.fixture',cursorOrigin:{x:-1200.25,y:240.25}},'capture binds context before later focus/context changes');
+ await voicePage.evaluate(async()=>{
+  nativeMessages=[];await baristaNativeVoicePrepare({id:active,captureID:'second-command',route:'command'});
+  await baristaVoiceFinal({captureID:'second-command',text:'WAIT second command'});
+ });
+ assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='speak').length),0,'a new voice command must not replay the previous turn');
+ await voicePage.evaluate(()=>baristaNativeStop({id:active}));
+ const text='Quotes " and \\ and newline\n<script>window.injected=true</script> 終';
+ await voicePage.evaluate(async({b,text})=>{
+  await baristaNativeSession({id:b});baristaNativeDraft({id:b,text,edit:4});
+  await baristaNativeSubmit({id:b,text,edit:4});
+ },{b,text});
+ await voicePage.waitForFunction(()=>current()?.status==='done');
+ assert.equal(companion.get(b).messages[0].text,text,'native text remains data');
+ assert.equal(await voicePage.evaluate(()=>window.injected),undefined);
+ await voicePage.evaluate(async({a,b})=>{await baristaNativeSession({id:a});baristaNativeDraft({id:b,text:'stale echo',edit:5})},{a,b});
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','late different-session callbacks cannot overwrite draft');
+ await voicePage.evaluate(()=>baristaNativeAdvanced({visible:true}));assert.equal(await voicePage.locator('#drawer').isVisible(),true);
+ assert.equal(await voicePage.locator('#drawer').evaluate(el=>el.scrollHeight<=el.clientHeight),true,'native controls use the outer page scroll, not a nested drawer');
+ await voicePage.evaluate(()=>baristaNativeAdvanced({visible:false}));assert.equal(await voicePage.locator('#drawer').isVisible(),false);
+ await voicePage.route('**/api/companion/send',async route=>{
+  const response=await route.fetch();
+  await voicePage.evaluate(async({a,b})=>{baristaNativeDraft({id:b,text:'Typed while sending',edit:11});await baristaNativeSession({id:a})},{a,b});
+  await route.fulfill({response});
+ });
+ await voicePage.evaluate(async({b})=>{await baristaNativeSession({id:b});baristaNativeDraft({id:b,text:'Second typed question',edit:10});await baristaNativeSubmit({id:b,text:'Second typed question',edit:10})},{b});
+ assert.equal(await voicePage.evaluate(({b})=>drafts.get(b).text,{b}),'Typed while sending','a delayed POST does not erase newer typing');
+ assert.equal(await voicePage.evaluate(()=>active),a,'a delayed POST does not change selection');
+ await voicePage.unroute('**/api/companion/send');
+ await voicePage.evaluate(async()=>{
+  const capture=await baristaNativeVoicePrepare({id:active,captureID:'dismissed',route:'dictation'});baristaDismissed();await baristaVoiceFinal({captureID:capture.captureID,text:'late after Escape'});
+ });
+ assert.equal(await voicePage.locator('#prompt').inputValue(),'New typed draft','dismissal rejects late speech and preserves draft');
+ await voicePage.evaluate(()=>{
+  events.close();window.nativeMessages=[];voiceReply=active;spoken='';
+  const next={...state,sessions:[{id:active,name:'Voice fixture',status:'thinking',messages:[{role:'assistant',text:'One sentence. ' }]}]};
+  render(next);render(next);next.sessions[0].messages[0].text='One sentence. Another sentence.';render(next);
+  next.sessions[0].status='done';render(next);render(next);
+ });
+ assert.deepEqual(await voicePage.evaluate(()=>window.nativeMessages.filter(m=>m.action==='speak').map(m=>m.text)),['One sentence. ','Another sentence.'],'stream and final do not repeat speech');
+ await voicePage.evaluate(()=>{
+  nativeMessages=[];
+  const sessions=Array.from({length:40},(_,i)=>({id:'fixture-'+i,name:'N'.repeat(300),status:'done',messages:[{role:'assistant',text:'private-secret'}],key:'private-secret',token:'private-secret',route:'local',presentation:'cursor'}));
+  active='fixture-0';showAnswer=true;
+  render({sessions,version:{instance:'fixture',revision:4},hub:{token:'private-secret',clients:[{id:'host-1',name:'Host',status:'idle',updatedAt:123,source:'mcp',host:{ancestors:[42,43],bundleId:'example.app',token:'private-secret'},capabilities:{observe:true,openHost:true,attach:false},messages:['private-secret']}],providers:[]}});
+ });
+ const projection=await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='hubState').at(-1));
+ assert.ok(projection,'native hub receives metadata');assert.equal(projection.sessions.length,8);assert.equal(projection.sessions[0].name.length,80);
+ assert.deepEqual(Object.keys(projection.sessions[0]).sort(),['id','name','needsApproval','status']);
+ assert.equal(JSON.stringify(projection).includes('private-secret'),false,'hub excludes conversation text and credentials');
+ assert.equal(projection.hub.clients[0].host.bundleId,'example.app');
+ assert.equal(await voicePage.locator('#answer').isVisible(),false,'cursor replies keep secondary answers closed');
+ await voicePage.evaluate(()=>render({version:{instance:'fixture',revision:3},sessions:[{id:active,name:'stale',status:'thinking',messages:[]}]}));
+ assert.equal(await voicePage.evaluate(()=>current().status),'done','old POST cannot replace newer SSE');
+ await voicePage.evaluate(()=>render({version:{instance:'fixture',revision:5},sessions:[{id:active,name:'Question',status:'done',route:'local',presentation:'prompt',messages:[{role:'assistant',text:'Which Save button?'}],approval:{id:'approval-1',reason:'Confirm',action:'click',app:'Fixture',index:2}}]}));
+ assert.equal(await voicePage.locator('#answer').innerText(),'Which Save button?');assert.equal(await voicePage.locator('#answer').isVisible(),true);
+ assert.equal(await voicePage.locator('#approval').isVisible(),true,'clarifications and approval remain accessible');
+ const essential=await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='composerState').at(-1));
+ assert.equal(essential.notice,'Which Save button?');assert.equal(essential.needsApproval,true);
+ await voicePage.evaluate(()=>{
+  render({version:{instance:'restarted',revision:0},sessions:[{id:active,name:'Restarted',status:'idle',messages:[]}]});
+  render({version:{instance:'fixture',revision:999},sessions:[{id:active,name:'Old daemon',status:'thinking',messages:[]}]});
+ });
+ assert.equal(await voicePage.evaluate(()=>current().name),'Restarted','late responses from a retired daemon instance cannot roll state back');
+ await voicePage.evaluate(()=>events.onerror());
+ assert.equal(await voicePage.evaluate(()=>nativeMessages.filter(m=>m.action==='hubState').at(-1).connected),false,'disconnect is projected without activation');
+ await voicePage.close();
+ assert.deepEqual(errors,[]);
+ console.log('PASS compact popup, authenticated routes, areas, safe text, dark layout, Escape, and explicit Stop');
+ console.log('Visual evidence:',path.join(dir,'popup-light.png'),path.join(dir,'popup-dark.png'));
+}finally{await browser.close();companion.close();pointers.shutdown();web.server.closeAllConnections();await new Promise(r=>web.server.close(r))}

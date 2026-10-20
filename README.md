@@ -46,6 +46,16 @@ the private `_AXUIElementGetWindow` bridge and can require updates when macOS ch
 - [Uninstall](#uninstall)
 - [Project layout](#project-layout)
 
+## Andy Barista
+
+Open `~/Applications/AndyBarista.app` or run `cua companion` for a café-themed desktop companion. Its compact native popup supports text, voice commands, and draft dictation. Each conversation has its own cursor, with area selection, circles, highlights, arrows, and freehand marks. Your real mouse stays yours.
+
+Exact-label cursor requests use local Accessibility lookup without a model. Other requests use the installed Andy CLI with an explicit model and no fallback. Guide mode points while you act. Act mode asks for approval before each input.
+
+The native notch hub shows companion sessions, installed providers, and connected MCP activity. It does not claim access to external conversations. The companion source and original artwork are MIT-licensed.
+
+See [companion setup, privacy, controls, and checks](docs/companion.md).
+
 ## Highlights
 
 - **The ChatGPT app's API, anywhere.** Accessibility-indexed actions, Playwright locators
@@ -115,9 +125,10 @@ tools, Python 3, OpenSSL 3 for local certificate setup, and a Chromium-family br
 
 The installer:
 
-1. Builds two small apps into `~/Applications`:
+1. Builds three native apps into `~/Applications`:
    - **CuaAgent**, which holds the macOS permissions.
-   - **CuaPreview**, the HUD, which needs no permissions.
+   - **CuaPreview**, the HUD and desktop cursors, which need no permissions.
+   - **AndyBarista**, the interactive café companion with menu-bar controls.
 2. Registers the `cua` MCP server with every harness it finds: Claude Code, Antigravity,
    Antigravity IDE, Gemini CLI and Cursor. Pass `--with-codex` to add Codex too.
 3. Installs the Claude Code skill and the `cua` CLI (`~/.local/bin/cua`).

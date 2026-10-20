@@ -5,12 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { config, paths } from "./config.mjs";
 import { render, diff } from "./snapshot.mjs";
+import { hudApp } from "./hud.mjs";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export const agentApp = process.env.CUA_AGENT_APP ?? path.join(os.homedir(), "Applications/CuaAgent.app");
 
 export class NativeClient {
-  #sock = null; #id = 0; #pending = new Map(); #connecting = null;
+  #sock = null; #id = 0; #pending = new Map(); #connecting = null; #opening = null;
   constructor(hooks = {}) { this.hooks = hooks; }
   get connected() { return !!this.#sock && !this.#sock.destroyed; }
 
@@ -22,13 +23,18 @@ export class NativeClient {
   async #connect() {
     for (let attempt = 0; attempt < 60; attempt++) {
       try { await this.#open(); return; } catch {}
-      if (attempt === 0) execFile("open", ["-g", "-j", agentApp], () => {});
+      if (attempt === 0) {
+        const environment = { CUA_RUN_DIR: path.resolve(paths.run), CUA_CONFIG: path.resolve(paths.config), CUA_HUD_APP: path.resolve(hudApp) };
+        execFile("open", ["-g", "-j", ...(process.env.CUA_RUN_DIR ? ["-n"] : []),
+          ...Object.entries(environment).flatMap(([name, value]) => ["--env", `${name}=${value}`]), path.resolve(agentApp)], () => {});
+      }
       await sleep(150);
     }
     throw new Error(`CuaAgent is not reachable. Is ${agentApp} installed?`);
   }
   #open() {
-    return new Promise((resolve, reject) => {
+    if (this.connected) return Promise.resolve();
+    this.#opening ??= new Promise((resolve, reject) => {
       const socket = net.createConnection(paths.agentSock);
       let buffer = "";
       socket.setEncoding("utf8");
@@ -55,10 +61,13 @@ export class NativeClient {
         }
         if (this.#sock === socket) this.#sock = null;
       });
-    });
+    }).finally(() => { this.#opening = null; });
+    return this.#opening;
   }
-  async req(cmd, args = {}, timeoutMs = 20000) {
-    await this.ensure();
+  async req(cmd, args = {}, timeoutMs = 20000, { beforeSend, passive = false } = {}) {
+    if (passive) { if (!this.connected) await this.#open(); }
+    else await this.ensure();
+    beforeSend?.();
     return this.#request(cmd, args, timeoutMs);
   }
   #request(cmd, args, timeoutMs) {
@@ -84,11 +93,26 @@ export class NativeClient {
   close() { this.#sock?.destroy(); }
   views() { return this.req("views"); }
   detach(viewId) { return this.req("detach", { viewId }); }
-  apps() { return this.req("apps"); }
-  async app(query, { windowId } = {}) {
+  apps({ includeAccessories = false, ...options } = {}) { return this.req("apps", includeAccessories ? { includeAccessories: true } : {}, options.passive ? 3000 : 20000, options); }
+  async lookup(query, { beforeSend } = {}) {
+    if (!config().native.enabled) throw new Error("Native app control is disabled in settings");
+    return this.req("lookup", query, 5000, { passive: true, beforeSend });
+  }
+  async app(query, { windowId, runningOnly = false, beforeSend } = {}) {
     if (!config().native.enabled) throw new Error("Native app control is disabled in settings");
     if (windowId != null && (!Number.isInteger(windowId) || windowId <= 0)) throw new Error("windowId must be a positive integer");
-    const info = await this.req("resolve", { query: String(query) });
+    let info;
+    if (runningOnly) {
+      const apps = await this.apps({ includeAccessories: true, beforeSend });
+      if (!Array.isArray(apps) || apps.length > 512) throw new Error("Running app metadata is unavailable");
+      const name = String(query).trim().toLowerCase();
+      const matches = apps.filter(app => /^\d+$/.test(name) ? app.pid === Number(name)
+        : [app.name, app.bundleId].some(value => typeof value === "string" && value.toLowerCase() === name));
+      if (matches.length !== 1) throw new Error(matches.length ? "More than one running app matches; use its pid" : "No exact running app matches; open the app yourself first");
+      info = matches[0];
+      if (!Number.isInteger(info.pid) || info.pid <= 1 || typeof info.process !== "string" || !info.process.startsWith(`${info.pid}:`)) throw new Error("Running app identity is unavailable");
+    } else info = await this.req("resolve", { query: String(query) }, 20000, { beforeSend });
+    beforeSend?.();
     return new App(this, { ...info, windowId });
   }
 }
@@ -141,7 +165,7 @@ export class App {
     // Never replay input, and invalidate indices even when an action partially fails.
     this.#gen = null;
     try {
-      const result = await this.#client.req(cmd, { ...target, ...args });
+      const result = await this.#client.req(cmd, { ...target, ...args }, 20000, { beforeSend: () => this.beforeAct?.(cmd) });
       if (result?.center) {
         this.#client.hooks.onCursor?.({ ...result.center, kind, app: this.pid, windowId: this.info.windowId });
         this.onPointer?.({ windowId: this.info.windowId, x: result.center.x, y: result.center.y }, kind);

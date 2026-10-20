@@ -1,0 +1,43 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { mock } from "node:test";
+
+const dir=fs.mkdtempSync(path.join(process.argv[2]??os.tmpdir(),"cua-agent-hub-"));
+const marker=path.join(dir,"must-not-run");
+fs.writeFileSync(path.join(dir,"andy"),`#!/bin/sh\ntouch '${marker}'\n`,{mode:0o700});
+const module=await import("../server/lib/agent-hub.mjs").catch(()=>({}));
+assert.equal(typeof module.AgentHub,"function","AgentHub provides bounded connected-client metadata");
+let now=1000,changes=0;
+mock.timers.enable({apis:["setInterval"]});
+const hub=new module.AgentHub({now:()=>now,ttlMs:1000,env:{PATH:dir},home:dir});
+hub.on("change",()=>changes++);
+try{
+  const inventory=hub.snapshot().providers;
+  assert.equal(inventory.find(p=>p.id==="andy").available,true);
+  assert.equal(inventory.find(p=>p.id==="codex").available,false);
+  assert.equal(fs.existsSync(marker),false,"discovery never runs installed commands");
+  assert.ok(inventory.every(p=>!p.capabilities.send&&!p.capabilities.attach&&!p.capabilities.resume),"installed does not mean attached");
+  assert.throws(()=>hub.register("../bad",{}),/session/i);
+  hub.register("session-1",{client:{name:"Fixture",version:"1",token:"private-secret"},host:{ancestors:[42,-1,43],bundleId:"example.app",token:"private-secret"},messages:["private-secret"]});
+  let client=hub.snapshot().clients[0];
+  assert.equal(client.id,"session-1");assert.equal(client.status,"idle");assert.equal(client.source,"mcp");
+  assert.deepEqual(client.host,{ancestors:[42,43],bundleId:"example.app"});assert.equal(client.capabilities.openHost,true);
+  assert.equal(JSON.stringify(hub.snapshot()).includes("private-secret"),false);
+  client.host.ancestors.push(99);client.capabilities.send=true;
+  client=hub.snapshot().clients[0];assert.deepEqual(client.host.ancestors,[42,43]);assert.equal(client.capabilities.send,false);
+  hub.activity("session-1","busy");assert.equal(hub.snapshot().clients[0].status,"busy");
+  assert.equal(hub.activity("unknown-session","busy"),false,"activity cannot create a client");
+  now=2100;mock.timers.tick(1000);
+  client=hub.snapshot().clients[0];assert.equal(client.status,"unknown");assert.equal(client.stale,true);assert.equal(client.capabilities.openHost,false);
+  assert.ok(changes>=3,"stale transitions reach subscribers");
+  now=2200;hub.activity("session-1","idle");assert.equal(hub.snapshot().clients[0].stale,false);
+  hub.end("session-1");assert.equal(hub.snapshot().clients.length,0);
+  assert.equal(hub.register("session-1",{client:{name:"late"}}),false,"a late registration cannot revive an ended connection");
+  hub.register("session-2",{client:{name:"N".repeat(200)},host:{ancestors:[42]}});
+  client=hub.snapshot().clients[0];assert.equal(client.name.length,80);assert.equal(client.capabilities.openHost,false,"ancestry alone does not authorize host focus");
+  hub.close();hub.close();assert.equal(hub.register("session-3",{}),false);
+  const stopped=changes;now=100000;mock.timers.tick(5000);assert.equal(changes,stopped,"close cancels background work");
+  console.log("PASS provider discovery, bounded metadata, lifecycle, stale state, and no false attachment capabilities");
+}finally{hub.close();mock.timers.reset();fs.rmSync(dir,{recursive:true,force:true})}

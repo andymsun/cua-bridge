@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Andy</title>
+<style>
+:root{color-scheme:light dark;--bg:#fcf9f2;--surface:#f1eadf;--ink:#302820;--muted:#716454;--line:#ded5c7;--accent:#785037;--on-accent:#fffaf2;--error:#a52e32;--focus:#47749c;font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#26221d;--surface:#393127;--ink:#f4eade;--muted:#c4b6a3;--line:#514638;--accent:#d6ac80;--on-accent:#241b13;--error:#ff9a9d;--focus:#9fc8ee}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);overflow:auto}button,textarea,select,input{font:inherit;color:inherit}button{cursor:pointer;background:transparent;border:0;border-radius:7px;min-height:30px;padding:5px 8px}button:hover:not(:disabled){background:var(--surface)}button:disabled{opacity:.45;cursor:default}button:focus-visible,textarea:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}#app{padding:10px 12px;max-width:600px;margin:auto}header{display:flex;align-items:center;gap:7px;min-height:24px;margin-bottom:6px}header svg{color:var(--accent)}header strong{font-size:12px;font-weight:650}#context{color:var(--muted);font-size:11px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.key{color:var(--muted);font-size:10px}.close{font-size:16px;width:26px;min-height:26px;padding:1px}.entry{display:flex;align-items:flex-end;gap:6px;padding:2px 0}textarea{flex:1;min-width:0;resize:none;background:transparent;border:0;border-radius:4px;padding:7px 2px;height:38px;max-height:86px;line-height:1.5}textarea::placeholder{color:var(--muted)}.send{background:var(--accent);color:var(--on-accent);width:32px;min-height:32px;font-size:17px;flex-shrink:0}.send:hover:not(:disabled){background:var(--accent)}.tools{display:flex;align-items:center;gap:2px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:5px;margin-top:4px}.tools button{font-size:11px;min-height:28px;padding:4px 7px}.spacer{flex:1}.danger{color:var(--error)}#status{font-size:11px;color:var(--muted);line-height:1.4;padding-top:5px}#status:empty{display:none}#status.busy:before{content:"";display:inline-block;width:5px;height:5px;margin:0 6px 1px 0;border-radius:50%;background:var(--accent)}#answer{font-size:13px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;max-height:210px;overflow:auto;border-top:1px solid var(--line);padding-top:9px;margin-top:8px}#error{font-size:12px;line-height:1.45;color:var(--error);overflow-wrap:anywhere;max-height:130px;overflow:auto;margin-top:7px}#approval{border:1px solid var(--accent);border-radius:9px;padding:9px;margin-top:8px}#approval p{white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow:auto;font-size:12px;line-height:1.45;margin:5px 0}.approve{background:var(--accent);color:var(--on-accent)}#drawTools{display:flex;gap:4px;flex-wrap:wrap;padding:6px 0}#drawTools button{background:var(--surface);font-size:11px}.drawer{border-top:1px solid var(--line);padding-top:9px;margin-top:8px;max-height:240px;overflow:auto;font-size:12px;line-height:1.5}.drawer p{margin:6px 0;color:var(--muted)}.row{display:flex;gap:5px;align-items:center;flex-wrap:wrap;margin:6px 0}select,input{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:5px;max-width:100%}select{flex:1;min-width:100px}label{font-size:11px;color:var(--muted)}#history{white-space:pre-wrap;overflow-wrap:anywhere;max-height:170px;overflow:auto;font-size:12px;line-height:1.5;margin-top:8px}.coordinates{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}.coordinates input{width:100%}summary{cursor:pointer;color:var(--muted);padding:5px 0}#area{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;margin-top:5px}#area span{flex:1}#area button{font-size:11px;min-height:24px}button[aria-pressed=true]{background:var(--surface);color:var(--accent)}[hidden]{display:none!important}.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}body[data-listening=true] .entry{box-shadow:0 2px 0 var(--accent)}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+body[data-native=true] header,body[data-native=true] #form,body[data-native=true] #status{display:none}body[data-native=true]:not([data-advanced=true]) .tools,body[data-native=true]:not([data-advanced=true]) #drawTools,body[data-native=true]:not([data-advanced=true]) #area{display:none}body[data-native=true] #app{padding:0 12px 8px}body[data-native=true] .drawer{max-height:none;overflow:visible}body[data-native=true]:not([data-expanded=true]) #app{padding:0;height:0;overflow:hidden}
+</style></head><body><div id="app">
+<header><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 8h12v7a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4zM16 9h2a3 3 0 0 1 0 6h-2M3 22h16M8 5V2M12 5V2"/></svg><strong>Andy</strong><span id="context">Your screen companion</span><span class="key">esc</span><button id="dismiss" class="close" aria-label="Dismiss popup">×</button></header>
+<form id="form"><div class="entry"><label class="sr" for="prompt">Ask Andy</label><textarea id="prompt" rows="1" maxlength="8000" placeholder="Ask about your screen…"></textarea><button id="send" class="send" aria-label="Send question" type="submit">↑</button><button id="stop" class="danger" type="button" hidden>Stop</button></div></form>
+<div class="tools"><button id="selectArea">Select</button><button id="drawToggle" aria-expanded="false">Draw</button><button id="demo">Pointer demo</button><span class="spacer"></span><button id="talk" aria-label="Hold to talk; release to send" title="Hold to talk · release to send">Talk</button><button id="more" aria-label="History and settings" aria-expanded="false">···</button></div>
+<div id="drawTools" hidden><button data-draw="circle">Circle</button><button data-draw="highlight">Highlight</button><button data-draw="arrow">Arrow</button><button data-draw="draw">Pen</button><button id="clearMarks" title="Clear this conversation’s marks">Clear marks</button></div>
+<div id="area" hidden><span id="areaText"></span><button id="areaStyle" aria-pressed="false">Spotlight</button><button id="clearArea" aria-label="Clear selected area">×</button></div>
+<div id="status" role="status" aria-live="polite">Connecting…</div><div id="error" role="alert" hidden></div>
+<section id="approval" hidden><strong>Approve one action</strong><p id="approvalText"></p><button id="approve" class="approve">Approve</button><button id="decline">Decline</button></section>
+<div id="answer" aria-label="Latest reply" hidden></div>
+<section id="drawer" class="drawer" hidden><div class="row"><label for="sessionChoice">Conversation</label><select id="sessionChoice" aria-label="Conversation"></select><button id="new">New</button></div><div class="row"><label for="mode">Mode</label><select id="mode"><option value="guide">Guide: I point, you act</option><option value="act">Act: approve each action</option></select></div><div class="row"><button id="showHistory">Show history</button><button id="readAloud">Read reply aloud</button><button id="remove" class="danger">Remove</button></div><div id="history" hidden></div><p id="backend"></p><p id="timing"></p><p>Tap ⌃⌥Space to toggle. Hold it to talk. Escape dismisses; it does not stop an agent turn.</p><p id="voiceInfo">Voice uses on-device recognition and an installed system voice. New speech interrupts playback.</p><p>Questions and requested app text go to your assistant provider. Drawing and the demo are local. No automatic screenshots.</p><div class="row"><button id="checkAccess">Check app access</button><button id="enableAccess">Enable app access…</button></div><p id="nativeStatus"></p><details><summary>Place an area by coordinates</summary><div class="coordinates"><label>X<input id="areaX" type="number" value="100"></label><label>Y<input id="areaY" type="number" value="100"></label><label>Width<input id="areaW" type="number" min="1" value="300"></label><label>Height<input id="areaH" type="number" min="1" value="180"></label></div><button id="placeArea">Show area</button></details></section>
+</div><script>
+const token='{{TOKEN}}',$=id=>document.getElementById(id),native=!!window.webkit?.messageHandlers?.barista;
+let state={sessions:[]},active=null,mode='guide',online=false,spotlight=false,showAnswer=false,removeArmed=null,appContext=null,voiceReply=null,spoken='',lastSize=0;
+let uiError='',advanced=false,composing=false,creating=null,voiceCapture=null,voicePhase='idle',voiceStatus='',talking=false,lastHub='';
+const drafts=new Map(),sending=new Set(),usedCaptures=new Set(),retiredInstances=new Set(),current=()=>state.sessions.find(s=>s.id===active);
+const draft=(id=active)=>{if(!drafts.has(id))drafts.set(id,{text:'',generation:0,edit:0});return drafts.get(id)};
+const bounded=(value,max)=>typeof value==='string'?value.slice(0,max):'';
+const latestAnswer=()=>[...(current()?.messages||[])].reverse().find(m=>m.role==='assistant')?.text||'';
+document.body.dataset.native=String(native);
+function renderHistory(){$('history').textContent=(current()?.messages||[]).map(m=>(m.role==='user'?'You':'Andy')+': '+m.text).join('\n\n')}
+function bridge(message){if(!native)throw new Error('Open the native Andy app for desktop gestures, the pointer demo, and voice. Coordinate tools remain available here.');window.webkit.messageHandlers.barista.postMessage(message)}
+function expanded(){document.body.dataset.expanded=String(advanced||!!current()?.approval||!$('error').hidden||!$('answer').hidden)}
+function error(message){uiError=bounded(message,4000);$('error').textContent=uiError;$('error').hidden=!uiError;expanded();publishNative()}
+async function api(route,data={}){const r=await fetch('/api/companion'+route,{method:'POST',headers:{'content-type':'application/json','x-cua-token':token},body:JSON.stringify(data)});const result=await r.json();if(!r.ok)throw new Error(result.error||'Request failed. Try again.');return result}
+function act(task){return Promise.resolve().then(task).catch(e=>{error(e.message);return false})}
+function sessionMetadata(){return state.sessions.slice(0,8).map(s=>({id:bounded(s.id,128),name:bounded(s.name,80),status:bounded(s.status,32),needsApproval:!!s.approval}))}
+function hubMetadata(hub){
+ if(!hub||typeof hub!=='object')return undefined;
+ const capabilities=c=>Object.fromEntries(['observe','openHost','resume','attach','send','interrupt'].map(k=>[k,c?.[k]===true]));
+ const clients=(Array.isArray(hub.clients)?hub.clients:[]).slice(0,32).map(c=>{
+  const bundleId=bounded(c.host?.bundleId,256)||null;
+  const ancestors=(Array.isArray(c.host?.ancestors)?c.host.ancestors:[]).filter(p=>Number.isInteger(p)&&p>0&&p<=2147483647).slice(0,32);
+  const result={id:bounded(c.id,128),name:bounded(c.name,80),status:['unknown','idle','busy','awaiting_user','error','exited'].includes(c.status)?c.status:'unknown',host:c.host?{ancestors,bundleId}:null,capabilities:capabilities(c.capabilities),updatedAt:Number.isFinite(c.updatedAt)?c.updatedAt:0,source:'mcp'};
+  if(c.client)result.client={name:bounded(c.client.name,80),version:bounded(c.client.version,80)};
+  if(typeof c.stale==='boolean')result.stale=c.stale;
+  return result;
+ });
+ const providers=(Array.isArray(hub.providers)?hub.providers:[]).slice(0,32).map(p=>({id:bounded(p.id,128),name:bounded(p.name,80),available:p.available===true,capabilities:capabilities(p.capabilities),...(p.detail?{detail:bounded(p.detail,400)}:{})}));
+ return {clients,providers};
+}
+function publishNative(){
+ if(!native)return;
+ const s=current(),d=draft(),sessions=sessionMetadata();
+ const hub={action:'hubState',connected:online,activeSessionID:active,sessions};
+ const metadata=hubMetadata(state.hub);if(metadata)hub.hub=metadata;
+ const signature=JSON.stringify(hub);if(signature!==lastHub){lastHub=signature;bridge(hub)}
+ bridge({action:'composerState',connected:online,activeSessionID:active,sessions,draft:d.text,generation:d.generation,edit:d.edit,status:s?.status||'idle',sending:sending.has(active),mode,route:s?.route||null,presentation:s?.presentation||null,notice:bounded(s?.error||state.error||uiError||(s?.presentation==='prompt'?latestAnswer():''),4000),needsApproval:!!s?.approval,advanced,voicePhase,voiceStatus});
+}
+function cancelCapture(notify=true){
+ const capture=voiceCapture;voiceCapture=null;talking=false;voicePhase='idle';voiceStatus='';document.body.dataset.listening='false';
+ if(capture&&notify&&native)bridge({action:'voiceCancel',captureID:capture.captureID});
+}
+function setDraft(text,{id=active,edit=draft(id).edit}={}){
+ const d=draft(id);if(text!==d.text){cancelCapture();d.text=text;d.generation++}d.edit=edit;
+ if(id===active)$('prompt').value=d.text;publishNative();return true;
+}
+function acceptNativeDraft(payload){
+ if(!payload||payload.id!==active||typeof payload.text!=='string'||payload.text.length>8000||!Number.isSafeInteger(payload.edit)||payload.edit<0)return false;
+ const d=draft();if(payload.edit<d.edit||(payload.edit===d.edit&&payload.text!==d.text))return false;
+ return setDraft(payload.text,{edit:payload.edit});
+}
+function chooseSession(id){
+ if(!state.sessions.some(s=>s.id===id))return false;
+ if(id!==active){cancelCapture();voiceReply=null;if(native)bridge({action:'silence'})}
+ active=id;mode=current()?.mode||'guide';$('mode').value=mode;$('prompt').value=draft().text;
+ removeArmed=null;$('remove').textContent='Remove';showAnswer=true;uiError='';paint();return true;
+}
+async function makeSession(clearDraft=false){
+ if(creating)return creating;
+ const previous=active,previousDraft=draft(previous);
+ creating=(async()=>{
+  const result=await api('/new',{name:state.sessions.length?'Andy · '+(state.sessions.length+1):'Andy',mode});
+  if(typeof result.id!=='string')throw new Error('CUA did not return a conversation.');
+  render(result);
+  if(!state.sessions.some(s=>s.id===result.id))throw new Error('That conversation is no longer available. Try again.');
+  if(active===previous){
+   if(previous===null&&!clearDraft){drafts.set(result.id,previousDraft);drafts.delete(null)}
+   else {cancelCapture();voiceReply=null;if(native)bridge({action:'silence'})}
+   active=result.id;$('prompt').value=draft().text;showAnswer=false;removeArmed=null;
+  }
+  paint();return result.id;
+ })();
+ try{return await creating}finally{creating=null}
+}
+function render(next){
+ if(!next||!Array.isArray(next.sessions))return false;
+ const version=next.version,previous=state.version;
+ if(version&&(typeof version.instance!=='string'||!version.instance||!Number.isSafeInteger(version.revision)||version.revision<0))return false;
+ if(previous){
+  if(!version||retiredInstances.has(version.instance))return false;
+  if(version.instance===previous.instance&&version.revision<previous.revision)return false;
+  if(version.instance!==previous.instance){
+   retiredInstances.add(previous.instance);if(retiredInstances.size>16)retiredInstances.delete(retiredInstances.values().next().value);
+   cancelCapture();voiceReply=null;
+  }
+ }
+ state=next;online=true;
+ if(!current()&&!creating){
+  const id=state.sessions.at(-1)?.id||null;
+  if(id!==active){cancelCapture();voiceReply=null;if(native)bridge({action:'silence'});active=id;$('prompt').value=draft().text;mode=current()?.mode||'guide';$('mode').value=mode}
+ }
+ if(voiceCapture&&voiceCapture.id!==null&&!state.sessions.some(s=>s.id===voiceCapture.id))cancelCapture();
+ paint();return true;
+}
+function paint(){
+ const s=current(),busy=s?.status==='thinking'||sending.has(active),approval=s?.approval,answer=latestAnswer();
+ $('send').disabled=!online||busy;$('send').hidden=!!busy;$('stop').hidden=!busy;$('mode').disabled=!!busy;
+ const signature=state.sessions.map(s=>s.id+':'+s.name).join('|');
+ if($('sessionChoice').dataset.signature!==signature){$('sessionChoice').replaceChildren();for(const session of state.sessions){const o=document.createElement('option');o.value=session.id;o.textContent=session.name;$('sessionChoice').append(o)}$('sessionChoice').dataset.signature=signature}
+ $('sessionChoice').value=active||'';
+ $('backend').textContent='Backend: '+(state.backend||'not configured')+(s?.route?' · '+s.route:'');
+ const t=s?.timings;$('timing').textContent=t?.firstTextMs!=null?'First reply: '+(t.firstTextMs/1000).toFixed(1)+' s'+(t.spawnMs!=null?' · process start '+t.spawnMs+' ms':''):'';
+ $('approval').hidden=!approval;if(approval)$('approvalText').textContent=(approval.reason||'Requested action')+'\n'+approval.action+' · '+approval.app+' · element '+approval.index+(approval.text?'\n'+approval.text:'');
+ $('answer').textContent=answer;
+ const essential=s?.presentation==='prompt';
+ $('answer').hidden=!answer||(!essential&&(!showAnswer||s?.presentation==='cursor'||(native&&!advanced)));
+ if(!$('history').hidden)renderHistory();
+ $('status').textContent=voiceStatus||(!online?'Reconnecting to local CUA…':state.demoActive?'Local demo · no mouse input sent':approval?'Waiting for your approval':busy?(s.timings?.firstEventMs!=null?'Andy is working…':'Starting Andy…'):'');
+ $('status').classList.toggle('busy',!!busy);$('demo').textContent=state.demoActive?'Stop demo':'Pointer demo';
+ const message=s?.error||state.error||uiError;$('error').textContent=message||'';$('error').hidden=!message;
+ $('area').hidden=!s?.area;if(s?.area)$('areaText').textContent=`Area · ${Math.round(s.area.w)} × ${Math.round(s.area.h)} pt`;
+ if(voiceReply===active&&spoken!==null&&answer&&s?.presentation!=='cursor'){
+  let rest=answer.startsWith(spoken)?answer.slice(spoken.length):answer;
+  if(!answer.startsWith(spoken)&&spoken.includes(answer))rest='';
+  const complete=busy?(rest.match(/^[\s\S]*?[.!?](?:\s|$)/)?.[0]||''):rest;
+  if(complete){bridge({action:'speak',text:complete.replace(/[*#`]/g,''),enqueue:true});spoken=answer.slice(0,answer.length-rest.length)+complete}
+  if(!busy)voiceReply=null;
+ }
+ expanded();publishNative();
+}
+async function sendPrompt({id,prompt,context,sendMode,generation,consumeDraft=false,asVoice=false}){
+ if(!prompt.trim())return false;
+ if(!online)throw new Error('Wait for local CUA to reconnect.');
+ const s=state.sessions.find(s=>s.id===id);
+ if(!s||s.status==='thinking'||sending.has(id))return false;
+ sending.add(id);voiceReply=asVoice?id:null;spoken=asVoice?null:'';showAnswer=true;uiError='';paint();
+ try{
+  const result=await api('/send',{id,prompt:prompt.trim(),mode:sendMode,context});
+  if(voiceReply===id&&spoken===null)spoken='';
+  render(result);
+  const d=draft(id);
+  if(consumeDraft&&d.generation===generation){d.text='';d.generation++;if(active===id)$('prompt').value=''}
+  return true;
+ }finally{sending.delete(id);paint()}
+}
+async function submit(){
+ const d=draft(),text=d.text,generation=d.generation,context=appContext?structuredClone(appContext):null,sendMode=mode;
+ if(!text.trim())return false;
+ let id=active;
+ if(!id){id=await makeSession(false);if(active!==id||draft(id)!==d)return false}
+ return sendPrompt({id,prompt:text,context,sendMode,generation,consumeDraft:true});
+}
+window.baristaNativeDraft=payload=>acceptNativeDraft(payload);
+window.baristaNativeSubmit=payload=>act(()=>acceptNativeDraft(payload)?submit():false);
+window.baristaNativeSession=payload=>act(()=>payload?.id===null?makeSession(true):chooseSession(payload?.id));
+window.baristaNativeStop=payload=>act(async()=>{
+ const id=payload?.id;if(!state.sessions.some(s=>s.id===id))return false;
+ if(voiceCapture?.id===id)cancelCapture();if(voiceReply===id)voiceReply=null;
+ if(native)bridge({action:'silence'});render(await api('/stop',{id}));return true;
+});
+window.baristaNativeAdvanced=payload=>{
+ if(typeof payload?.visible!=='boolean')return false;
+ advanced=payload.visible;document.body.dataset.advanced=String(advanced);$('drawer').hidden=!advanced;$('more').setAttribute('aria-expanded',advanced);if(advanced)showAnswer=true;paint();return true;
+};
+window.baristaNativeVoicePrepare=async payload=>{
+ if(!payload||payload.id!==active||!['command','dictation'].includes(payload.route)||typeof payload.captureID!=='string'||!payload.captureID||payload.captureID.length>128||usedCaptures.has(payload.captureID))return null;
+ if(!online||(payload.route==='command'&&(current()?.status==='thinking'||sending.has(active)))){error('Stop the current turn or wait for CUA before speaking a command.');return null}
+ cancelCapture();usedCaptures.add(payload.captureID);if(usedCaptures.size>64)usedCaptures.delete(usedCaptures.values().next().value);
+ const d=draft(),capture={captureID:payload.captureID,id:active,route:payload.route,generation:d.generation,mode,context:appContext?structuredClone(appContext):null};voiceCapture=capture;voiceReply=null;spoken='';
+ try{
+  if(!capture.id){const id=await makeSession(false);if(voiceCapture!==capture||active!==id||draft(id)!==d)return null;capture.id=id}
+  if(voiceCapture!==capture||active!==capture.id||draft().generation!==capture.generation)return null;
+  return {captureID:capture.captureID,id:capture.id,route:capture.route,generation:capture.generation};
+ }catch(e){if(voiceCapture===capture)cancelCapture();error(e.message);return null}
+};
+const matchesCapture=payload=>voiceCapture&&payload?.captureID===voiceCapture.captureID&&active===voiceCapture.id&&draft().generation===voiceCapture.generation;
+window.baristaVoiceCancelled=payload=>{if(payload?.captureID===voiceCapture?.captureID){cancelCapture(false);paint()}};
+window.baristaVoiceState=payload=>{
+ if(!matchesCapture(payload)||!['permission','listening','finishing','idle','ready'].includes(payload.phase))return;
+ voicePhase=payload.phase;const dictation=voiceCapture.route==='dictation';
+ voiceStatus=voicePhase==='permission'?'Allow speech and microphone access, then try again.':voicePhase==='listening'?(dictation?'Dictating · choose Finish voice to append':'Listening · release to send'):voicePhase==='finishing'?'Finishing your phrase…':voicePhase==='ready'?'Voice ready. Start again to speak.':'';
+ document.body.dataset.listening=String(['permission','listening','finishing'].includes(voicePhase));
+ if(voicePhase==='ready')cancelCapture(false);paint();
+};
+window.baristaVoiceText=payload=>{if(matchesCapture(payload)){voiceStatus=bounded(payload.text,240);paint()}};
+window.baristaVoiceFinal=payload=>act(async()=>{
+ if(!matchesCapture(payload)||typeof payload.text!=='string')return false;
+ const capture=voiceCapture,text=payload.text.trim();cancelCapture(false);paint();
+ if(!text)return false;if(text.length>8000)throw new Error('That phrase is too long. Try a shorter one.');
+ if(capture.route==='dictation'){
+  const combined=[draft().text,text].filter(Boolean).join(' ');if(combined.length>8000)throw new Error('The draft is full. Shorten it before dictating more.');
+  setDraft(combined);paint();return true;
+ }
+ return sendPrompt({id:capture.id,prompt:text,context:capture.context,sendMode:capture.mode,generation:capture.generation,asVoice:true});
+});
+window.baristaContext=context=>{appContext=context;$('context').textContent=context?.app||'Your screen companion';$('context').title=context?.app||''};
+window.baristaSelection=rect=>act(async()=>{if(!active)await makeSession();render(await api('/select',{id:active,rect,style:spotlight?'spotlight':'ring'}));if(!native)$('prompt').focus()});
+window.baristaAnnotation=shape=>act(async()=>{if(!active)await makeSession();render(await api('/annotate',{id:active,shape}))});
+window.baristaDemoContext=context=>act(async()=>render(await api('/demo',context)));
+window.baristaNativeError=payload=>{
+ if(typeof payload==='string'){error(payload);return}
+ if(!voiceCapture||payload?.captureID!==voiceCapture.captureID)return;cancelCapture(false);error(payload.message);paint();
+};
+window.baristaVoiceInfo=info=>{$('voiceInfo').textContent='Voice: '+info.name+'. Dictation adds to your draft; hold the shortcut for a separate command. '+(info.enhanced?'Enhanced system voice.':'Install an enhanced macOS voice for higher-quality replies.')};
+window.baristaOpened=()=>{document.body.hidden=false;if(!native)$('prompt').focus();publishNative();return native?act(async()=>render(await api('/warm'))):true};
+window.baristaDismissed=()=>{cancelCapture();voiceReply=null;window.baristaNativeAdvanced({visible:false});if(state.demoActive)act(async()=>render(await api('/demo-stop')))};
+window.baristaStopAll=()=>act(async()=>{cancelCapture();voiceReply=null;await api('/demo-stop');render(await api('/stop-all'))});
+$('prompt').oninput=()=>setDraft($('prompt').value);
+$('prompt').addEventListener('compositionstart',()=>{composing=true});$('prompt').addEventListener('compositionend',()=>{composing=false;setDraft($('prompt').value)});
+$('form').onsubmit=e=>{e.preventDefault();if(!composing)act(()=>submit())};
+$('prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&!composing&&e.keyCode!==229){e.preventDefault();if(!$('send').disabled)$('form').requestSubmit()}};
+$('dismiss').onclick=()=>{window.baristaDismissed();if(native)bridge({action:'dismiss'});else{$('answer').hidden=true;$('prompt').blur()}};
+$('stop').onclick=()=>window.baristaNativeStop({id:active});
+$('more').onclick=()=>window.baristaNativeAdvanced({visible:!advanced});
+$('drawToggle').onclick=()=>{$('drawTools').hidden=!$('drawTools').hidden;$('drawToggle').setAttribute('aria-expanded',!$('drawTools').hidden)};
+$('selectArea').onclick=()=>act(()=>bridge({action:'select'}));for(const b of document.querySelectorAll('[data-draw]'))b.onclick=()=>act(()=>bridge({action:'draw',kind:b.dataset.draw}));
+$('clearMarks').onclick=()=>act(async()=>{if(active)render(await api('/clear',{id:active}));if(state.demoActive)render(await api('/demo-stop'))});
+$('demo').onclick=()=>act(async()=>{if(state.demoActive)render(await api('/demo-stop'));else bridge({action:'demo'})});
+$('talk').disabled=!native;
+async function startTalk(){
+ if(talking)return;
+ const prepared=window.baristaNativeVoicePrepare({id:active,captureID:crypto.randomUUID(),route:'command'});
+ talking=true;const capture=await prepared;
+ if(!talking||!capture){if(capture)cancelCapture();talking=false;return}
+ bridge({action:'voiceStart',...capture});
+}
+function endTalk(){if(!talking)return;talking=false;if(voiceCapture)bridge({action:'voiceEnd',captureID:voiceCapture.captureID})}
+$('talk').onpointerdown=e=>{e.preventDefault();$('talk').setPointerCapture(e.pointerId);act(startTalk)};$('talk').onpointerup=endTalk;$('talk').onpointercancel=()=>{cancelCapture();paint()};
+$('talk').onclick=e=>{if(e.detail===0){if(talking)endTalk();else act(startTalk)}};
+$('talk').onkeydown=e=>{if((e.key===' '||e.key==='Enter')&&!e.repeat){e.preventDefault();act(startTalk)}};$('talk').onkeyup=e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();endTalk()}};
+$('new').onclick=()=>act(()=>makeSession(true));$('sessionChoice').onchange=()=>chooseSession($('sessionChoice').value);
+$('mode').onchange=()=>{cancelCapture();mode=$('mode').value;publishNative()};$('showHistory').onclick=()=>{$('history').hidden=!$('history').hidden;if(!$('history').hidden)renderHistory()};
+$('readAloud').onclick=()=>act(()=>{const reply=latestAnswer();if(!reply)throw new Error('Ask a question first.');bridge({action:'speak',text:reply})});
+$('remove').onclick=()=>act(async()=>{if(!active)return;if(removeArmed!==active){removeArmed=active;$('remove').textContent='Confirm removal';return}const id=active;cancelCapture();render(await api('/remove',{id}));drafts.delete(id);removeArmed=null;$('remove').textContent='Remove'});
+$('placeArea').onclick=()=>window.baristaSelection({x:Number($('areaX').value),y:Number($('areaY').value),w:Number($('areaW').value),h:Number($('areaH').value)});
+$('clearArea').onclick=()=>act(async()=>render(await api('/clear',{id:active})));
+$('areaStyle').onclick=()=>act(async()=>{spotlight=!spotlight;$('areaStyle').setAttribute('aria-pressed',spotlight);if(current()?.area)render(await api('/select',{id:active,rect:current().area,style:spotlight?'spotlight':'ring'}))});
+$('approve').onclick=()=>act(async()=>render(await api('/approve',{id:active,approvalId:current().approval.id,allow:true})));
+$('decline').onclick=()=>act(async()=>render(await api('/approve',{id:active,approvalId:current().approval.id,allow:false})));
+$('checkAccess').onclick=()=>act(async()=>{const r=await fetch('/api/status',{headers:{'x-cua-token':token}});const s=await r.json();if(!r.ok)throw new Error(s.error||'Check failed');$('nativeStatus').textContent=s.agent?.accessibility?'App access is enabled.':'Enable CuaAgent in macOS Accessibility to read or control apps. Drawing does not need this permission.'});
+$('enableAccess').onclick=()=>act(async()=>{const s=await api('/permissions',{permission:'accessibility'});$('nativeStatus').textContent=s.permission.granted?'App access is enabled.':s.permission.message||'Approve CuaAgent in macOS Accessibility, then check again.'});
+const events=new EventSource('/api/companion/events?t='+encodeURIComponent(token));events.onmessage=e=>{try{render(JSON.parse(e.data))}catch(e){error(e.message)}};events.onerror=()=>{online=false;cancelCapture();paint()};
+window.addEventListener('keydown',e=>{if(e.key==='Escape'&&!e.isComposing&&!composing&&e.keyCode!==229){e.preventDefault();$('dismiss').click()}});
+new ResizeObserver(()=>{const height=Math.ceil($('app').getBoundingClientRect().height);if(native&&Math.abs(height-lastSize)>1){lastSize=height;bridge({action:'resize',height})}}).observe($('app'));
+</script></body></html>

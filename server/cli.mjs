@@ -39,9 +39,28 @@ const ok = (b, s) => `${b ? "✓" : "✗"} ${s}`;
 
 try {
 switch (cmd) {
+  case "mcp-config":
+    console.log(JSON.stringify({ mcpServers: { cua: {
+      command: process.execPath, args: [path.join(here, "shim.mjs")],
+      env: { CUA_RUN_DIR: path.resolve(paths.run), CUA_CONFIG: path.resolve(paths.config),
+        CUA_AGENT_APP: path.resolve(agentApp), CUA_HUD_APP: path.resolve(hudApp) },
+    } } }, null, 2));
+    break;
   case "start": await start(); console.log("cua daemon running"); break;
   case "stop": if (await up()) await post("/shutdown").catch(() => {}); console.log("cua daemon stopped"); break;
   case "restart": if (await up()) { await post("/shutdown").catch(() => {}); await sleep(600); } await start(); console.log("cua daemon restarted"); break;
+  case "companion": {
+    await start();
+    const s = await post("/status");
+    if (!s.urls.companion) throw new Error("This daemon predates companion mode. Stop it when other sessions are idle, then run cua companion again.");
+    if (process.argv.includes("--url")) { console.log(s.urls.companion); break; }
+    if (process.argv.includes("--browser")) execFile("open", [s.urls.companion]);
+    else {
+      if (!fs.existsSync(hudApp)) throw new Error(`Build CuaPreview first, or use cua companion --browser. Expected: ${hudApp}`);
+      await new Promise((resolve, reject) => execFile("open", ["-n", "--env", `CUA_RUN_DIR=${paths.run}`, "--env", `CUA_CONFIG=${paths.config}`, hudApp, "--args", "--companion", s.urls.companion], error => error ? reject(error) : resolve()));
+    }
+    console.log(s.urls.companion); break;
+  }
   case "ui": case "settings": {
     await start();
     const s = await post("/status");
@@ -146,7 +165,7 @@ switch (cmd) {
     break;
   }
   default:
-    console.log("usage: cua status|start|stop|restart|ui|settings|doctor|use|toggle\nnative: cua apps|windows APP|attach APP --window ID [--host APP --host-window ID]|views|detach ID\npermissions: cua permissions accessibility|screen-recording");
+    console.log("usage: cua status|start|stop|restart|ui|settings|companion [--browser]|mcp-config|doctor|use|toggle\nnative: cua apps|windows APP|attach APP --window ID [--host APP --host-window ID]|views|detach ID\npermissions: cua permissions accessibility|screen-recording");
 }
 process.exit(0);
 } catch (error) {

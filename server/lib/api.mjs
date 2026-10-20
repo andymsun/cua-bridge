@@ -66,7 +66,9 @@ export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
     const guard = (cmd) => { if (guiding) throw new Error(`guide mode: point at it and let the person do it (${cmd} was not sent). cua.guide.stop() ends guide mode.`); };
     const follow = (a) => {
       a.beforeAct = guard;
-      a.onPointer = (target, kind) => { if (config().pointer.followActions) pointers.move(me, target, { kind: kind === "click" ? "click" : "move" }); };
+      a.onPointer = (target, kind) => {
+        if (config().pointer.followActions && pointers.move(me, target, { kind: kind === "click" ? "click" : "move" })) pointers.describe(me, { state: "done" });
+      };
       return a;
     };
     /** Point at element `at` (an index from the last read) or [x, y] in the window, saying why. */
@@ -75,14 +77,16 @@ export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
       const target = where.rect && !highlight
         ? { windowId: where.windowId, x: where.rect.x + where.rect.w / 2, y: where.rect.y + where.rect.h / 2 }
         : where;
-      if (!pointers.move(me, target, { text, kind: where.rect && highlight ? "rect" : "point" })) return "pointer is off in settings (pointer.enabled)";
+      if (!pointers.move(me, target, { text, kind: where.rect && highlight ? "rect" : "point", persistent: guiding })) return "pointer is off in settings (pointer.enabled)";
+      pointers.describe(me, { state: guiding ? "waiting" : "done" });
       return `pointing at ${Array.isArray(at) ? `(${at[0]}, ${at[1]})` : `element ${at}`} in ${a.name}${text ? `: ${text}` : ""}`;
     };
     const point = async (target, at, text, opts) => {
       if (target && typeof target.locate === "function") return pointAt(target, at, text, opts);
       // a screen point in global points, top-left origin (what CGWindow bounds use)
       if (Number.isFinite(target?.x) && Number.isFinite(target?.y)) {
-        if (!pointers.move(me, { screen: [target.x, target.y] }, { text: at })) return "pointer is off in settings (pointer.enabled)";
+        if (!pointers.move(me, { screen: [target.x, target.y] }, { text: at, persistent: guiding })) return "pointer is off in settings (pointer.enabled)";
+        pointers.describe(me, { state: guiding ? "waiting" : "done" });
         return `pointing at screen (${target.x}, ${target.y})${at ? `: ${at}` : ""}`;
       }
       throw new Error("point(app, index | [x, y], label) or point({ x, y }, label)");
@@ -111,13 +115,23 @@ export function makeApiFactory({ engine, native, hud, urls, pw, pointers }) {
       },
       point,
       highlight: (a, at, text) => pointAt(a, at, text, { highlight: true }),
-      pointer: { hide: () => pointers.hide(me) },
+      pointer: {
+        hide: () => pointers.hide(me),
+        name: (name) => pointers.describe(me, { name }),
+        annotate: (shape) => {
+          const mark = pointers.annotate(me, shape);
+          if (mark) pointers.describe(me, { state: guiding ? "waiting" : "done" });
+          return mark;
+        },
+        say: (text, state = "waiting") => pointers.describe(me, { text, state }),
+        area: (rect, text, { spotlight = false, persistent = true } = {}) => pointers.move(me, { screenRect: rect }, { text, kind: spotlight ? "spotlight" : "rect", persistent }),
+      },
       guide: {
         start() { guiding = true; return "guide mode on: point, highlight and waitForChange; clicks and typing are refused"; },
         stop() { guiding = false; pointers.hide(me); return "guide mode off"; },
         get active() { return guiding; },
       },
-      ui: () => { write(`Live browser: ${urls().browser}\nSettings: ${urls().settings}`); return urls(); },
+      ui: () => { write(`Live browser: ${urls().browser}\nSettings: ${urls().settings}\nCompanion: ${urls().companion ?? "unavailable"}`); return urls(); },
       config: () => config(),
       setConfig: (patch) => saveConfig(deepMerge(config(), patch)),
       native: { status: () => native.status() },
