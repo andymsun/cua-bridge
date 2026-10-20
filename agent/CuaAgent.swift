@@ -167,12 +167,71 @@ func eventClick(pid: pid_t, at p: CGPoint, window: CGWindowID?, button: String, 
         postMouse(pid: pid, up, at: p, button: b, window: window, clickState: n); usleep(40_000)
     }
 }
-/// Real click at an element's centre, for elements Accessibility can't press.
-func eventClick(_ el: AXUIElement, button: String, count: Int) throws {
-    guard let f = axFrame(el), f.width > 0 else { throw AgentError("Element has no on-screen frame to click") }
-    var pid: pid_t = 0
-    AXUIElementGetPid(el, &pid)
-    eventClick(pid: pid, at: CGPoint(x: f.midX, y: f.midY), window: windowID(of: el), button: button, count: count)
+/// Mouse fallback stays inside the selected window and the target's current visible ancestry.
+func eventClick(_ el: AXUIElement, in t: Table, button: String, count: Int) throws {
+    let reader = LookupReader()
+    do {
+        guard let window = t.windowElement, let id = t.windowID else {
+            throw LookupFailure("incomplete", "The selected window's exact identity is unavailable.")
+        }
+        try reader.ownedWindow(window, window: window, id: id, pid: t.pid)
+        try reader.ownedWindow(el, window: window, id: id, pid: t.pid)
+        guard lookupPositiveRect(t.window), try reader.frame(window) == t.window,
+              try reader.bool(window, kAXMinimizedAttribute) == false,
+              let frame = try reader.frame(el), lookupPositiveRect(frame), t.window.contains(frame) else {
+            throw LookupFailure("incomplete", "The element has no usable frame inside the selected window.")
+        }
+        // AX hit testing takes Float coordinates. Deliver exactly the tested point, never a
+        // clamped point in a nearby control or a differently rounded mouse coordinate.
+        let point = CGPoint(x: Double(Float(frame.midX)), y: Double(Float(frame.midY)))
+        guard point.x.isFinite, point.y.isFinite, frame.contains(point) else {
+            throw LookupFailure("incomplete", "The element's center cannot be hit-tested precisely.")
+        }
+        // Application-scoped hit testing ignores other apps, preserving background use.
+        // An overlapping window in this app must not stand in for the selected window.
+        let application = appElement(t.pid)
+        try reader.prepare(application)
+        var hit: AXUIElement?
+        _ = try reader.checked(AXUIElementCopyElementAtPosition(application, Float(point.x), Float(point.y), &hit))
+        var hits = Set<AXUIElement>(), matched = false
+        while let current = hit, hits.count <= reader.maxDepth {
+            guard hits.insert(current).inserted else { break }
+            try reader.ownedWindow(current, window: window, id: id, pid: t.pid)
+            if CFEqual(current, el) { matched = true; break }
+            hit = try reader.element(current, kAXParentAttribute)
+        }
+        guard matched else { throw LookupFailure("incomplete", "Hit testing could not verify the exact target at its center.") }
+
+        var parent: AXUIElement? = el, chain = Set<AXUIElement>(), reachedWindow = false
+        while let current = parent, chain.count <= reader.maxDepth {
+            guard chain.insert(current).inserted else { break }
+            try reader.ownedWindow(current, window: window, id: id, pid: t.pid)
+            let state = try reader.state(current)
+            guard !state.hidden, state.enabled != false else {
+                throw LookupFailure("incomplete", "The target or an ancestor is hidden or disabled.")
+            }
+            if let clip = try reader.frame(current) {
+                guard lookupPositiveRect(clip), clip.contains(frame) else {
+                    throw LookupFailure("incomplete", "The element is clipped by its current ancestry.")
+                }
+            } else if ["AXScrollArea", "AXWebArea"].contains(state.raw) {
+                throw LookupFailure("incomplete", "The target's viewport geometry is unavailable.")
+            }
+            if CFEqual(current, window) { reachedWindow = true; break }
+            parent = try reader.element(current, kAXParentAttribute)
+        }
+        guard reachedWindow else { throw LookupFailure("incomplete", "The target's bounded, noncyclic window ancestry could not be verified.") }
+        try reader.ownedWindow(el, window: window, id: id, pid: t.pid)
+        guard try reader.frame(el) == frame, try reader.frame(window) == t.window,
+              try reader.bool(window, kAXMinimizedAttribute) == false else {
+            throw LookupFailure("incomplete", "Target geometry or window visibility changed during validation.")
+        }
+        try checkProcess(t.pid, t.process)
+        try reader.checkTime()
+        eventClick(pid: t.pid, at: point, window: id, button: button, count: count)
+    } catch let failure as LookupFailure {
+        throw AgentError("Cannot safely click this element: \(failure.message) No mouse events were sent.", code: "click_target_unavailable")
+    }
 }
 func eventScroll(pid: pid_t, at p: CGPoint, window: CGWindowID?, direction: String, pixels: Double) {
     let sign: Int32 = direction.hasPrefix("u") || direction.hasPrefix("l") ? 1 : -1
@@ -913,19 +972,20 @@ func postText(pid: pid_t, text: String) {
     }
 }
 
-/// Click semantics through Accessibility: right-click shows the element's menu,
-/// double-click opens it (or presses twice when it has no open action).
-func click(_ el: AXUIElement, button: String, count: Int) throws {
+/// Left clicks use Accessibility press/open actions; right clicks show the menu.
+/// Middle clicks have no AX equivalent and always need a validated mouse target.
+func click(_ el: AXUIElement, in t: Table, button: String, count: Int) throws {
     if button.hasPrefix("r") {
         if axActions(el).contains("AXShowMenu"), axPerform(el, "AXShowMenu") { return }
-        return try eventClick(el, button: button, count: 1)
+        return try eventClick(el, in: t, button: button, count: 1)
     }
+    if button.hasPrefix("m") { return try eventClick(el, in: t, button: button, count: count) }
     if count >= 2 {
         if axActions(el).contains("AXOpen"), axPerform(el, "AXOpen") { return }
-        return try eventClick(el, button: button, count: count)
+        return try eventClick(el, in: t, button: button, count: count)
     }
     // plain groups and custom views (common in Electron apps) have no press action
-    do { try press(el) } catch { try eventClick(el, button: button, count: 1) }
+    do { try press(el) } catch { try eventClick(el, in: t, button: button, count: 1) }
 }
 
 /// Scroll the nearest scroll area at or above an element by pages.
@@ -1173,7 +1233,7 @@ func handle(_ req: [String: Any]) throws -> Any {
     case "snapshot": return try snapshot(pid: try needPid(), window: targetWindow, maxDepth: min(60, max(1, (req["maxDepth"] as? NSNumber)?.intValue ?? 30)))
     case "press":
         let e = try el(); let c = center(try needPid(), gen, e)
-        try click(e, button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
+        try click(e, in: table(), button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
         return ["center": c as Any]
     case "pressAt":
         let p = try needPid()
