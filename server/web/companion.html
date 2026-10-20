@@ -304,7 +304,14 @@ function paint(){
  $('area').hidden=!s?.area;if(s?.area)$('areaText').textContent=`Area · ${Math.round(s.area.w)} × ${Math.round(s.area.h)} pt`;
  if(voiceReply===active&&spoken!==null&&answer){
   let rest=answer.startsWith(spoken)?answer.slice(spoken.length):answer;
-  if(!answer.startsWith(spoken)&&spoken.includes(answer))rest='';
+  // Final output may drop narration. Match emitted sentences, not arbitrary substrings.
+  if(!answer.startsWith(spoken)){
+   for(const part of spoken.matchAll(/[\s\S]*?[.!?](?:\s|$)/g)){
+    const suffix=spoken.slice(part.index).trimStart();
+    if(answer.trimEnd()===suffix.trimEnd()){rest='';break}
+    if(answer.startsWith(suffix)){rest=answer.slice(suffix.length);break}
+   }
+  }
   const complete=busy?(rest.match(/^[\s\S]*?[.!?](?:\s|$)/)?.[0]||''):rest;
   if(complete){bridge({action:'speak',text:complete.replace(/[*#`]/g,''),enqueue:true});spoken=answer.slice(0,answer.length-rest.length)+complete}
   if(!busy)voiceReply=null;

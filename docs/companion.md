@@ -230,7 +230,9 @@ Voice uses Apple's Speech framework with on-device recognition and AVAudioEngine
 
 Speech Recognition and Microphone access need explicit macOS approval. Normal popup use never opens the microphone. If you release the key before approval, setup can finish, but capture does not start. Hold the shortcut again after approval.
 
-Voice requests get spoken replies in sentence-sized chunks, including replies with cursor output. The secondary text answer stays hidden for cursor guidance. A new voice request stops playback and an active agent turn. Escape stops playback without stopping an agent turn. **Read reply aloud** also works for typed requests.
+Voice requests get spoken replies in sentence-sized chunks, including replies with cursor output. The secondary text answer stays hidden for cursor guidance. The app compares complete spoken sentences when the final answer omits earlier narration. It does not discard distinct short answers. A new voice request stops playback and an active agent turn. Escape stops playback without stopping an agent turn.
+
+**Read reply aloud** also works for typed requests.
 
 Output uses the highest-quality matching system voice available to the app, excluding personal voices. The **···** drawer shows the selected voice. Install an enhanced macOS voice for better output. The current local preview selected Samantha; this does not establish Clicky-quality voice or full-duplex conversation. Live microphone recognition still needs a check after OS approval.
 

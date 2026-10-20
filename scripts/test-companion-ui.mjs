@@ -16,6 +16,7 @@ const {Companion}=await import("../server/lib/companion.mjs");
 const {startWeb}=await import("../server/lib/web.mjs");
 const {findExecutable}=await import("../server/lib/browser.mjs");
 const pointers=new Pointers(),companion=new Companion({pointers,native:{}});
+pointers.launch=()=>{};
 let warmCalls=0;const warm=pointers.warm.bind(pointers);pointers.warm=()=>{warmCalls++;return warm()};
 const web=startWeb({engine:{running:false},native:{},hud:{},token:"test-token",status:async()=>({}),companion});
 const {port}=await web.listen(),origin=`http://127.0.0.1:${port}`;
@@ -243,6 +244,32 @@ try{
   next.sessions[0].status='done';render(next);render(next);
  });
  assert.deepEqual(await voicePage.evaluate(()=>window.nativeMessages.filter(m=>m.action==='speak').map(m=>m.text)),['One sentence. ','Another sentence.'],'stream and final do not repeat speech');
+ for(const fixture of [
+  {name:'final message drops earlier narration',stream:['I will check the window. ','I will check the window. Open View. ','I will check the window. Open View. Choose'],final:'Open View. Choose Sidebar.',want:['I will check the window. ','Open View. ','Choose Sidebar.']},
+  {name:'final unpunctuated tail waits for completion',stream:['I will check the window. ','I will check the window. Open View. '],final:'Open View. Choose Sidebar',want:['I will check the window. ','Open View. ','Choose Sidebar']},
+  {name:'longest spoken suffix prevents replay of repeated sentences',stream:['Ready. ','Ready. Open View. ','Ready. Open View. Open View. '],final:'Open View. Open View. Choose Sidebar.',want:['Ready. ','Open View. ','Open View. ','Choose Sidebar.']},
+  {name:'fully spoken final suffix is not replayed',stream:['Ready. ','Ready. Open View. '],final:'Open View.',want:['Ready. ','Open View. ']},
+  {name:'a different final answer is still spoken',stream:['Checking the window. '],final:'The window is not available.',want:['Checking the window. ','The window is not available.']},
+  {name:'a correction within a spoken sentence stays complete',stream:['Ready. ','Ready. Open View. '],final:'Open View settings instead.',want:['Ready. ','Open View. ','Open View settings instead.']},
+  {name:'dismissal rejects the late final tail',stream:['Ready. ','Ready. Open View. '],final:'Open View. Choose Sidebar.',dismiss:true,want:['Ready. ','Open View. ']},
+  {name:'a distinct one-letter final is not part of a narration word',stream:['Checking each choice. '],final:'C',want:['Checking each choice. ','C']},
+  {name:'new final punctuation is not a spoken suffix',stream:['Ready.'],final:'.NET needs a runtime.',want:['Ready.','.NET needs a runtime.']},
+  {name:'a final sentence inside earlier narration is distinct',stream:['I heard someone say Open View. '],final:'Open View.',want:['I heard someone say Open View. ','Open View.']},
+  {name:'Unicode utterance suffixes keep the new tail',stream:['Préparation. ','Préparation. Café prêt. '],final:'Café prêt. Ouvrez la vue.',want:['Préparation. ','Café prêt. ','Ouvrez la vue.']},
+ ]){
+  const spokenTurn=await voicePage.evaluate(({stream,final,dismiss})=>{
+   nativeMessages=[];voiceReply=active;spoken='';
+   const next={...state,sessions:[{id:active,name:'Final voice fixture',status:'thinking',messages:[{role:'assistant',text:''}]}]};
+   for(const text of stream){next.sessions[0].messages[0].text=text;render(next)}
+   if(dismiss)baristaDismissed();
+   next.sessions[0].messages[0].text=final;render(next);
+   next.sessions[0].status='done';render(next);render(next);
+   return {utterances:nativeMessages.filter(m=>m.action==='speak').map(m=>m.text),voiceReply};
+  },fixture);
+  assert.deepEqual(spokenTurn.utterances,fixture.want,fixture.name);
+  assert.equal(spokenTurn.voiceReply,null,'completed or dismissed voice turns are disarmed');
+ }
+ console.log('PASS eleven streamed-to-final voice continuity cases, including distinct finals and late completion after dismissal');
  await voicePage.evaluate(()=>{
   nativeMessages=[];voiceReply=active;spoken='';
   const next={...state,sessions:[{id:active,name:'Spoken cursor fixture',status:'thinking',route:'model',presentation:'cursor',messages:[{role:'assistant',text:'Look at this control. '}]}]};
