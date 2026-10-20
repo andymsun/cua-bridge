@@ -11,6 +11,112 @@ final class MotionChecks: NSObject, NSApplicationDelegate {
     func require(_ condition: Bool, _ message: String) {
         if !condition { overlay.windows.forEach { $0.window.close() }; fputs("FAIL \(message)\n", stderr); exit(1) }
     }
+    @MainActor func checkActiveGuidance(_ screenIndex: Int = 0) async {
+        let previousMouse = overlay.readMouse
+        defer { overlay.readMouse = previousMouse }
+        let screen = overlay.windows[screenIndex], top = NSScreen.screens.first!.frame.maxY
+        let bounds = CGRect(x: screen.screen.frame.minX, y: top-screen.screen.frame.maxY, width: screen.screen.frame.width, height: screen.screen.frame.height)
+        let area = CGRect(x: bounds.minX+100, y: bounds.minY+100, width: 120, height: 80)
+        let target = CGPoint(x: area.midX, y: area.midY)
+        let elsewhere = CGPoint(x: bounds.minX+bounds.width*0.8, y: bounds.minY+bounds.height*0.7)
+        var mouse = elsewhere
+        overlay.readMouse = { CGPoint(x: mouse.x, y: top-mouse.y) }
+        let stamp = Date().timeIntervalSince1970*1000-4000
+        overlay.boundsByID[999999999] = area
+        let instruction: [String: Any] = ["target": ["windowId": 999999999, "rect": ["x": 0, "y": 0, "w": 1, "h": 1]],
+            "kind": "spotlight", "state": "waiting", "persistent": true, "name": "Owned guide", "label": "Complete this manual step", "t": stamp,
+            "annotations": [["id": "reference", "kind": "circle", "target": ["screenRect": ["x": area.minX, "y": area.minY, "w": area.width, "h": area.height]], "t": stamp]]]
+        overlay.document = ["cursors": ["guidance": instruction]]
+        let unchanged = NSDictionary(dictionary: overlay.document)
+        overlay.tick(updateWindows: false)
+        await pause(0.2)
+        var mark = overlay.marks["guidance"]![screenIndex]!
+        let localTarget = PointerGeometry.local(target, screen: screen.screen.frame, primaryTop: top)
+        require(hypot(position(mark.cursor).x-localTarget.x, position(mark.cursor).y-localTarget.y)<2, "an unvisited pending target remains anchored even when its timestamp is old")
+        require(overlay.presenceTimer == nil, "an unvisited pending target does not start presence polling")
+        let ink = mark.annotationLayers["reference"]!.path!.boundingBox
+        mouse = target; overlay.tick(updateWindows: false)
+        await pause(0.8)
+        require(mark.leader.opacity>0 && mark.ring.opacity>0, "visiting a pending target yields without releasing its target cues")
+        overlay.boundsByID[999999999] = area.offsetBy(dx: 400, dy: 220); overlay.tick(updateWindows: false)
+        mouse.x += 1; overlay.tick(updateWindows: false)
+        require(overlay.presenceTimer == nil && mark.ring.opacity>0, "window movement and pointer jitter alone do not imply a human departure")
+        overlay.boundsByID[999999999] = area; overlay.tick(updateWindows: false)
+        mouse = CGPoint(x: area.maxX+60, y: target.y); overlay.tick(updateWindows: false)
+        await pause(0.8)
+        require(overlay.presenceTimer == nil && mark.ring.opacity>0, "small movement around a pending target does not release it")
+        mouse = elsewhere; overlay.tick(updateWindows: false)
+        await pause(1.5)
+        let localMouse = PointerGeometry.local(mouse, screen: screen.screen.frame, primaryTop: top)
+        require(hypot(position(mark.cursor).x-localMouse.x, position(mark.cursor).y-localMouse.y)<120, "a pending guide follows after the person visits its target and moves elsewhere")
+        require(mark.pill.isHidden && mark.leader.opacity==0 && mark.ring.opacity==0 && screen.shade.opacity==0, "visual release retires the old instruction, leader, ring, and spotlight")
+        require(mark.annotationLayers["reference"]!.path!.boundingBox==ink && mark.annotationLayers["reference"]!.opacity>0, "visual release keeps explicit ink at its original target")
+        require(unchanged.isEqual(to: overlay.document), "visual release cannot complete a pending step or alter its target authority")
+        require(overlay.presenceTimer != nil, "a released pending cursor uses existing adaptive presence")
+        mouse = target; overlay.tick(updateWindows: false)
+        await pause(0.8)
+        require(mark.pill.isHidden && mark.leader.opacity==0 && mark.ring.opacity==0, "returning near an old target cannot revive released guidance")
+        overlay.boundsByID = [:]; overlay.tick(updateWindows: false)
+        require(overlay.presenceTimer != nil, "a released guide keeps following when its old target disappears")
+        overlay.boundsByID[999999999] = area.offsetBy(dx: 400, dy: 220); overlay.tick(updateWindows: false)
+        require(mark.ring.opacity==0 && mark.leader.opacity==0, "a reappearing target cannot revive released guidance")
+        overlay.marks.values.flatMap { $0.values }.forEach { $0.remove() }; overlay.marks = [:]; overlay.seen = [:]
+        overlay.tick(updateWindows: false); await pause(0.2)
+        mark = overlay.marks["guidance"]![screenIndex]!
+        require(overlay.presenceTimer != nil && mark.pill.isHidden && mark.ring.opacity==0, "rebuilding presentation does not revive released guidance")
+        var other = instruction
+        other["target"] = ["screenRect": ["x": bounds.minX+80, "y": bounds.maxY-160, "w": 80, "h": 60]]
+        overlay.document = ["cursors": ["guidance": instruction, "other": other]]; overlay.tick(updateWindows: false)
+        require(mark.pill.isHidden && !overlay.marks["other"]![screenIndex]!.pill.isHidden, "one released cursor does not release another guide")
+        var changed = instruction
+        changed["target"] = ["screenRect": ["x": area.minX+80, "y": area.minY+160, "w": area.width, "h": area.height]]
+        overlay.document = ["cursors": ["guidance": changed]]; overlay.tick(updateWindows: false)
+        require(!mark.pill.isHidden && mark.ring.opacity>0 && overlay.presenceTimer == nil, "a changed target re-arms guidance even when its millisecond timestamp is unchanged")
+        overlay.boundsByID[999999999] = area
+        var next = instruction; next["t"] = stamp+1
+        mouse = elsewhere; overlay.document = ["cursors": ["guidance": next]]; overlay.tick(updateWindows: false)
+        await pause(1.5)
+        require(hypot(position(mark.cursor).x-localTarget.x, position(mark.cursor).y-localTarget.y)<2 && !mark.pill.isHidden && mark.ring.opacity>0, "a fresh published update re-arms the pending target")
+        require(overlay.presenceTimer == nil, "a fresh target stops released presence polling")
+        next["t"] = Date().timeIntervalSince1970*1000
+        mouse = target; overlay.document = ["cursors": ["guidance": next]]; overlay.tick(updateWindows: false)
+        mouse = elsewhere; overlay.tick(updateWindows: false)
+        require(overlay.presenceTimer == nil && mark.ring.opacity>0, "a new target keeps its initial hold despite an immediate visit and departure")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            next["t"] = stamp+2; next["motion"] = "pending-stroke"
+            next["annotations"] = [["id": "pending-stroke", "kind": "draw", "points": [[target.x, target.y], [elsewhere.x, elsewhere.y]], "durationMs": 6000, "t": Date().timeIntervalSince1970*1000]]
+            mouse = target; overlay.document = ["cursors": ["guidance": next]]; overlay.tick(updateWindows: false)
+            mouse = elsewhere; overlay.tick(updateWindows: false)
+            require(mark.cursor.isTracing && overlay.presenceTimer == nil && mark.ring.opacity>0, "departure cannot interrupt a pending guide's drawing")
+            overlay.document = ["cursors": [:]]; overlay.tick(updateWindows: false)
+            let recent = Date().timeIntervalSince1970*1000-2600
+            var short = instruction; short["t"] = recent; short["kind"] = "click"; short["motion"] = "rebuild"
+            let start = PointerGeometry.stroke(kind: "circle", rect: area, points: []).first!
+            short["origin"] = ["x": start.x, "y": start.y]
+            short["annotations"] = [["id": "rebuild", "kind": "circle", "target": ["screenRect": ["x": area.minX, "y": area.minY, "w": area.width, "h": area.height]], "durationMs": 120, "t": recent]]
+            mouse = target; overlay.document = ["cursors": ["guidance": short]]; overlay.tick(updateWindows: false)
+            await pause(0.18)
+            mouse = elsewhere; overlay.tick(updateWindows: false)
+            mark = overlay.marks["guidance"]![screenIndex]!
+            require(!mark.cursor.isTracing && mark.pill.isHidden, "a short trace finishes before visual release")
+            overlay.marks.values.flatMap { $0.values }.forEach { $0.remove() }; overlay.marks = [:]; overlay.seen = [:]
+            overlay.tick(updateWindows: false); mark = overlay.marks["guidance"]![screenIndex]!
+            require(!mark.cursor.isTracing, "rebuilding released guidance cannot restart its ink motion")
+            await pause(0.03)
+            require(hypot(position(mark.cursor).x-localMouse.x, position(mark.cursor).y-localMouse.y)<120, "released guidance cannot replay a flight from its old origin")
+            let holder = mark.cursor.layer!.sublayers!.first!, transform = holder.transform
+            let pressScale = hypot(transform.m21, transform.m22) / (0.4 + 0.6 * CGFloat(holder.opacity))
+            require(abs(pressScale-1)<0.01, "rebuilding released guidance cannot replay a click pulse")
+        }
+        overlay.document = ["cursors": ["guidance": ["target": NSNull(), "t": stamp]]]; overlay.tick(updateWindows: false)
+        require(overlay.attention.isEmpty && overlay.presenceTimer == nil, "hiding a target clears its visual release history")
+        overlay.document = ["cursors": [:]]; overlay.tick(updateWindows: false)
+        require(overlay.attention.isEmpty && overlay.presenceTimer == nil, "removing guidance clears its visual release history and presence timer")
+        overlay.document = ["cursors": ["guidance": instruction]]; mouse = elsewhere; overlay.tick(updateWindows: false)
+        require(!overlay.marks["guidance"]![screenIndex]!.pill.isHidden, "a reused cursor id does not inherit released guidance")
+        overlay.document = ["cursors": [:]]; overlay.tick(updateWindows: false)
+        print("PASS active guide visit, departure, visual release, pending-state preservation, and fresh-update rearm on screen \(screenIndex)")
+    }
     @MainActor func check() async {
         let hz60:CGFloat=1/60, hz120:CGFloat=1/120, remainder:CGFloat=1/150
         let partitions:[[CGFloat]]=[Array(repeating:0.001,count:40),[0.04],[0.007,0.013,0.003,0.017],[hz60,hz60,remainder],[hz120,hz120,hz120,hz120,remainder]]
@@ -121,6 +227,7 @@ final class MotionChecks: NSObject, NSApplicationDelegate {
         require(mark.cursor.isTracing && overlay.presenceTimer==nil,"return delay cannot interrupt a long stroke")
         await pause(2);overlay.tick()
         require(!mark.cursor.isTracing && overlay.presenceTimer != nil,"finished stroke returns without another mouse event")
+        for index in overlay.windows.indices { await checkActiveGuidance(index) }
         if NSEvent.mouseLocation != realMouse {print("NOTE real mouse changed outside the simulated input source")}
         overlay.document = ["cursors": [:]];overlay.tick()
         require(overlay.marks.isEmpty,"cursor cleanup removes all native marks")

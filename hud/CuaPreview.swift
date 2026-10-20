@@ -772,6 +772,7 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
     var windows: [(screen: NSScreen, window: OverlayWindow, view: FlippedView, shade: CAShapeLayer)] = []
     var marks: [String: [Int: PointerMark]] = [:]
     var seen: [String: Double] = [:]
+    var attention: [String: (time: Double, target: NSDictionary, visited: CGPoint?, released: Bool)] = [:]
     var emptySince: Date?, watcher: DispatchSourceFileSystemObject?, watcherFD: Int32 = -1
     var modified: Date?, document: [String: Any] = [:]
     var boundsByID: [UInt32: CGRect] = [:]
@@ -850,6 +851,7 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
             }
         }
         for id in Array(marks.keys) where cursors[id] == nil { marks[id]?.values.forEach { $0.remove() }; marks[id] = nil; seen[id] = nil }
+        for id in Array(attention.keys) where (cursors[id]?["target"] as? [String: Any]) == nil { attention[id] = nil }
         var occupied: [Int: [CGRect]] = [:], spotlights: [Int: (time: Double, rect: CGRect)] = [:]
         var occupiedTips: [CGPoint] = [], hasPresence = false
         lastMouse = readMouse()
@@ -859,8 +861,21 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
             guard let c = live[id], let target = c["target"] as? [String: Any] else { marks[id]?.values.forEach { $0.hide() }; continue }
             let t = (c["t"] as? NSNumber)?.doubleValue ?? 0, fresh = seen[id] != t; seen[id] = t
             let tracing = marks[id]?.values.contains { $0.cursor.isTracing } ?? false
-            let returning = c["state"] as? String == "done" && now.timeIntervalSince1970-t/1000 >= 2.5 && !tracing
-            guard let at = resolve(target) ?? (returning ? (point:mouse,rect:nil) : nil) else {marks[id]?.values.forEach{$0.hide()};continue}
+            let state = c["state"] as? String ?? "pointing", age = now.timeIntervalSince1970-t/1000
+            let active = ["pointing", "waiting"].contains(state), resolved = resolve(target)
+            var focus = attention[id] ?? (time: t, target: NSDictionary(dictionary: target), visited: nil, released: false)
+            if focus.time != t || !focus.target.isEqual(to: target) { focus = (time: t, target: NSDictionary(dictionary: target), visited: nil, released: false) }
+            // A visit and a substantial departure release only the presentation, never the pending step.
+            if active, !focus.released, let at = resolved {
+                let area = at.rect ?? CGRect(origin: at.point, size: .zero)
+                if area.insetBy(dx: -48, dy: -48).contains(mouse) { focus.visited = mouse }
+                if let visited = focus.visited, !area.insetBy(dx: -144, dy: -144).contains(mouse),
+                   hypot(mouse.x-visited.x, mouse.y-visited.y) >= 144, age >= 2.5, !tracing { focus.released = true }
+            }
+            attention[id] = focus
+            let released = active && focus.released
+            let returning = (state == "done" || released) && age >= 2.5 && !tracing
+            guard let at = resolved ?? (returning ? (point:mouse,rect:nil) : nil) else {marks[id]?.values.forEach{$0.hide()};continue}
             let kind = c["kind"] as? String ?? "point", text = c["label"] as? String ?? ""
             let persistent = c["persistent"] as? Bool ?? false
             let mouseScreen = screens.first { $0.contains(mouse) }
@@ -877,15 +892,15 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
                 } else { mark.leader.opacity = 0 }
                 CATransaction.commit()
                 // Every screen receives the same global flight, including its offscreen portions.
-                if let origin = c["origin"] as? [String: NSNumber], let x = origin["x"], let y = origin["y"] {
+                if !released, let origin = c["origin"] as? [String: NSNumber], let x = origin["x"], let y = origin["y"] {
                     mark.cursor.begin(at: PointerGeometry.local(CGPoint(x: x.doubleValue, y: y.doubleValue), screen: entry.screen.frame, primaryTop: top))
                 }
-                let motion = c["motion"] as? String
+                let motion = released ? nil : c["motion"] as? String
                 mark.annotations(c["annotations"] as? [[String: Any]] ?? [], motion: motion, local: { PointerGeometry.local($0, screen: entry.screen.frame, primaryTop: top) }, resolve: resolve)
-                if motion == nil || !mark.cursor.isTracing { mark.cursor.move(to: p, click: fresh && kind == "click") }
+                if motion == nil || !mark.cursor.isTracing { mark.cursor.move(to: p, click: fresh && !released && kind == "click") }
                 if fresh { mark.labelUntil = Date(timeIntervalSince1970: t / 1000).addingTimeInterval(labelSeconds) }
                 let show = persistent || now < mark.labelUntil
-                let showLabel = show && (!returning || now < mark.labelUntil)
+                let showLabel = show && !released && (!returning || now < mark.labelUntil)
                 mark.pill.isHidden = !(showLabel && !text.isEmpty && entry.view.bounds.contains(p))
                 if !mark.pill.isHidden {
                     var avoid = occupied[i] ?? []
@@ -895,7 +910,7 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
                     let frame = mark.label(text, name: c["name"] as? String ?? "Andy", state: c["state"] as? String ?? "pointing", at: p, bounds: entry.view.bounds, occupied: avoid)
                     occupied[i, default: []].append(frame)
                 }
-                if let r = at.rect, ["rect", "spotlight"].contains(kind), show {
+                if let r = at.rect, ["rect", "spotlight"].contains(kind), show && !released {
                     let origin = PointerGeometry.local(r.origin, screen: entry.screen.frame, primaryTop: top)
                     let rect = CGRect(origin: origin, size: r.size).insetBy(dx: -4, dy: -4)
                     CATransaction.begin(); CATransaction.setDisableActions(true)
