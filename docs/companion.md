@@ -92,6 +92,8 @@ The companion uses a restricted MCP adapter, not CUA's full JavaScript REPL. Bui
 
 A manual step can take longer than the 30-second app check. The conversation then shows **Paused**, not Done. The compact native popup shows **Continue guide** instead of Clear marks. The browser shows Continue beside the pending step.
 
+A paused guide keeps its cursor in **Waiting**, not Done. An unvisited cue stays at its target. After a visit and substantial departure, the cursor can follow you while the step stays paused. The end of a model turn does not reset that visit history. Stop and End guide still remove the cue.
+
 **Continue guide** keeps your draft. It starts a new Guide turn with the conversation's next-turn model. It resolves the app and window again before the model starts. If the window is missing or ambiguous, choose its current window and use Continue again. Old process IDs, window IDs, element references, and approvals never authorize a resumed step.
 
 You can ask questions while a guide is paused. **Stop** cancels active work but keeps the saved step. **··· → End guide** clears the step and its marks without deleting messages or your draft. A submitted Act task also ends the manual guide. New conversations have separate guide state.

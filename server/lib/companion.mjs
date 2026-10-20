@@ -424,7 +424,9 @@ export class Companion extends EventEmitter {
     s.error = s.error || error;
     try {
       if (s.error) this.pointers.hide(s.cursor);
-      this.pointers.describe(s.cursor, { state: s.error ? "error" : "done" });
+      const state = s.error ? "error" : s.guide ? "waiting" : "done";
+      // Keep the visit/departure history of an already waiting cue.
+      if (state !== "waiting" || this.pointers.snapshot().cursors[s.cursor]?.state !== "waiting") this.pointers.describe(s.cursor, { state });
     } catch (feedError) { s.error ||= `Pointer feed could not be updated: ${text(feedError.message, 500)}`; }
     s.guideKey = null; s.guideTarget = null;
     s.status = s.error ? "error" : s.guide ? "paused" : "done";

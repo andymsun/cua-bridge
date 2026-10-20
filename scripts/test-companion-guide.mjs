@@ -71,6 +71,7 @@ function setup() {
         assert.throws(() => companion.resume(session.id, f.state().guide.id), /current turn/i, "Continue cannot restart the original active wait");
         mock.timers.tick(30000); await waiting;
       } finally { mock.timers.reset(); }
+      f.waitingCursor = pointers.snapshot().cursors[session.cursor];
       await f.finish(); return f.state().guide;
     },
     close() { mock.timers.reset(); companion.close(); pointers.shutdown(); }
@@ -93,7 +94,23 @@ test("a timed-out manual wait saves inert context and finishes paused, not done"
     assert.deepEqual(saved.guide, step);
     for (const key of ["pid", "process", "windowId", "generation", "key", "approval", "target"]) assert(!Object.hasOwn(step, key), key + " is not checkpoint authority");
     assert.equal(f.session.key, null);
-    assert.equal(f.pointers.snapshot().cursors[f.session.cursor].state, "done", "a paused step releases the active pointer after its normal hold");
+    const cursor = f.pointers.snapshot().cursors[f.session.cursor];
+    assert.equal(cursor.state, "waiting", "a paused step is not a completed cursor");
+    assert.equal(cursor.t, f.waitingCursor.t, "turn completion cannot rearm an existing waiting cue");
+    assert.deepEqual(cursor.target, f.waitingCursor.target);
+    assert.equal(cursor.label, f.waitingCursor.label);
+  } finally { f.close(); }
+});
+
+test("an unresolved step cannot become a completed cursor after a follow-up", async () => {
+  const f = setup();
+  try {
+    const step = await f.pause(); await f.begin("Explain the same exercise"); await f.read();
+    await f.companion.tool(f.session.id, f.session.key, "point", { app: "4242", index: 1, label: "This exercise still needs your action" });
+    await f.companion.tool(f.session.id, f.session.key, "say", { text: "This exercise still needs your action", state: "done" });
+    await f.finish();
+    assert.equal(f.state().status, "paused"); assert.deepEqual(f.state().guide, step);
+    assert.equal(f.pointers.snapshot().cursors[f.session.cursor].state, "waiting");
   } finally { f.close(); }
 });
 
