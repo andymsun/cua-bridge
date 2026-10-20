@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isRegExp } from "node:util/types";
 import { config, paths } from "./config.mjs";
 import { render, diff } from "./snapshot.mjs";
 import { hudApp } from "./hud.mjs";
@@ -154,8 +155,8 @@ export class App {
   }
   async find(query) {
     const result = await this.#snap();
-    const re = query instanceof RegExp ? query : new RegExp(String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    return result.entries.map((entry, index) => `${index + 1} ${entry.text}`).filter((line) => re.test(line)).join("\n") || "(no match)";
+    const re = isRegExp(query) ? new RegExp(query.source, query.flags) : new RegExp(String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    return result.entries.map((entry, index) => `${index + 1} ${entry.text}`).filter((line) => { re.lastIndex = 0; return re.test(line); }).join("\n") || "(no match)";
   }
   async #act(cmd, args, kind) {
     this.beforeAct?.(cmd);

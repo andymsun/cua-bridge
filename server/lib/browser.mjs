@@ -5,6 +5,7 @@
 import { execFile, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isRegExp } from "node:util/types";
 import { CDP } from "./cdp.mjs";
 import { config, expandHome, paths } from "./config.mjs";
 import { parseCombo } from "./keys.mjs";
@@ -450,10 +451,10 @@ export class Tab {
   /** Lines of the current tree matching text/regex, with live indices. */
   async find(query) {
     const { entries } = await this.#snapshot();
-    const re = query instanceof RegExp ? query : new RegExp(String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const re = isRegExp(query) ? new RegExp(query.source, query.flags) : new RegExp(String(query).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     const { refs } = render(entries, { maxLines: config().snapshot.maxLines });
     this.#refs = refs;
-    return entries.map((e, i) => `${i + 1} ${e.text}`).filter((l) => re.test(l)).join("\n") || "(no match)";
+    return entries.map((e, i) => `${i + 1} ${e.text}`).filter((l) => { re.lastIndex = 0; return re.test(l); }).join("\n") || "(no match)";
   }
 
   async text() { return this.evaluate("document.body?.innerText ?? ''"); }

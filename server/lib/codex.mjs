@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isRegExp } from "node:util/types";
 import { config, expandHome, paths } from "./config.mjs";
 import { readDoc } from "./docs.mjs";
 import { unique } from "./pw.mjs";
@@ -24,7 +25,7 @@ const OPTS_AT = { click: 0, dblclick: 0, hover: 0, check: 0, uncheck: 0, clear: 
 
 // Codex option names -> Playwright's
 function pwOpts(o) {
-  if (!o || typeof o !== "object" || Array.isArray(o) || o instanceof RegExp) return o;
+  if (!o || typeof o !== "object" || Array.isArray(o) || isRegExp(o)) return o;
   const { timeoutMs, ...rest } = o;
   return timeoutMs == null ? rest : { ...rest, timeout: timeoutMs };
 }
@@ -104,7 +105,7 @@ export function makeCodexApi({ engine, pw, hud, urls, write, image, opened, hint
       };
       const resolveArg = async (x) => {
         if (x?.__chain) return x.__resolve();
-        if (x && typeof x === "object" && !Array.isArray(x) && !(x instanceof RegExp)) {
+        if (x && typeof x === "object" && !Array.isArray(x) && !isRegExp(x)) {
           const o = {};
           for (const [k, v] of Object.entries(pwOpts(x))) o[k] = v?.__chain ? await v.__resolve() : v;
           return o;
