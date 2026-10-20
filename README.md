@@ -16,17 +16,21 @@
   <img src="docs/live-view.png" alt="The cua live view: a Codex-style browser with tabs, address bar and the agent's own cursor typing into Wikipedia's search box" width="900">
 </p>
 
-cua gives an agent its own browser and its own cursor. The agent works in a headless
-browser and in native macOS apps **entirely in the background**. Your mouse and keyboard
-stay yours, and your windows don't jump to the front. You watch it work in a live view
-that fits in a sidebar or a floating HUD, and you can take over at any moment.
+cua gives an agent its own browser and its own cursor. Browser actions stay in a
+separate headless browser. Native actions address a selected process and window;
+they never move your real pointer. Native apps can reject background input or change
+keyboard focus, so read after each action. A live view shows the work in a sidebar
+or floating HUD, and you can take over at any moment.
 
 It speaks the same API as the ChatGPT app's in-app browser (`agent` / `browser` / `tab`
 with `ax`, `playwright`, `dom_cua`, `cua` and capabilities) and its computer use (`sky`),
 with explicit native window selection and fresh reads after each native action. It is
 an independent implementation using CDP, Accessibility, ScreenCaptureKit and Playwright;
-no Codex or ChatGPT code or assets are shipped. Native window mapping currently uses
-the private `_AXUIElementGetWindow` bridge and can require updates when macOS changes.
+no Codex or ChatGPT code or assets are shipped. Native window IDs use the private
+`_AXUIElementGetWindow` bridge. Mouse input uses optional private CoreGraphics calls
+to keep its window-local point. These APIs can change with macOS. If the mouse
+binding fails, CUA sends no mouse events; semantic Accessibility actions remain
+available. See the [native API limits](server/docs/computer-use.md#native-mouse-input).
 
 ## Contents
 

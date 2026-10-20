@@ -28,6 +28,19 @@ final class CGEvent {
     func postToPid(_ pid: pid_t) { posted.append(InputEvent(pid: pid, type: type, point: point, button: button, fields: fields)) }
 }
 
+// Actual AppKit construction is checked separately by test-native-mouse.py.
+var mouseConstructionFailure: CGEventType?
+func mouseEvent(_ type: CGEventType, at point: CGPoint, button: CGMouseButton = .left, window: CGWindowID?, frame: CGRect, clickState: Int = 1) throws -> CGEvent {
+    if type == mouseConstructionFailure { throw AgentError("Owned event construction failure") }
+    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: button)!
+    event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
+    if let window = window {
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window))
+    }
+    return event
+}
+
 let kAXRoleAttribute = "AXRole", kAXSubroleAttribute = "AXSubrole", kAXEnabledAttribute = "AXEnabled"
 let kAXPositionAttribute = "AXPosition", kAXSizeAttribute = "AXSize", kAXParentAttribute = "AXParent"
 let kAXWindowAttribute = "AXWindow", kAXWindowsAttribute = "AXWindows", kAXChildrenAttribute = "AXChildren"

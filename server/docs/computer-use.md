@@ -48,6 +48,34 @@ state = await sky.get_app_state(target); // mandatory after every action
   approve access themselves. Never reset TCC as an automated repair.
 - Same confirmation rules as the browser (see `confirmations`).
 
+## Native mouse input
+
+CUA prefers semantic Accessibility actions. Indexed middle clicks use mouse events,
+not an ordinary press. A mouse fallback needs the exact process and selected window,
+a visible positive target rectangle, full containment within applicable ancestor
+clips, and a matching hit in that window. An uncertain target fails with
+`click_target_unavailable`; CUA does not move the point onto another control.
+
+Mouse, drag, and coordinate-scroll events carry both the selected window ID and
+its window-local point. The public `NSEvent` constructor supplies the window ID.
+Optional private CoreGraphics calls restore the local point after the global point
+is set. Their ABI appears in
+[WebKit's CoreGraphicsTestSPI.h](https://github.com/WebKit/WebKit/blob/main/Tools/TestRunnerShared/spi/CoreGraphicsTestSPI.h).
+CoreGraphics stays loaded through the app's framework links; the helper closes
+only its extra symbol-lookup handle. A missing symbol or invalid mouse binding
+returns `window_input_unavailable` without mouse output. Semantic actions do not
+need this mouse path. Future macOS versions can need a compatibility update.
+
+CUA constructs the complete click, drag, or scroll sequence before it posts any
+part. It posts to the selected process, not the global event stream, and never
+warps the real pointer. This is not universal background input support. AppKit
+can use a first click to change the key window without sending it to the control.
+Read the target after each action. Do not retry ambiguous input automatically.
+
+Owned AppKit checks cover title-bar offsets, a negative-origin second display,
+left/right/middle events, drag callbacks, and an actual scroll-view change. They
+do not prove delivery to every app or unchanged keyboard focus in the background.
+
 ## Independent previews and host windows
 
 The **target** is the window being captured/controlled. The optional **host** is

@@ -27,7 +27,7 @@ struct Fixture {
     }
 }
 func fixture(origin: CGPoint = CGPoint(x: 100, y: 100)) -> Fixture {
-    posted = []; axCalls = []; hitTests = []; tables = [:]; applications = [:]; identities = [:]
+    posted = []; mouseConstructionFailure = nil; axCalls = []; hitTests = []; tables = [:]; applications = [:]; identities = [:]
     let frame = CGRect(origin: origin, size: CGSize(width: 800, height: 600))
     let app = AXUIElement("app", pid: fixturePID, role: "AXApplication")
     let window = AXUIElement("window", pid: fixturePID, role: "AXWindow", windowID: fixtureWindowID, frame: frame)
@@ -308,6 +308,12 @@ check("buttons", "coordinate middle control still uses window-local translation"
     let f = fixture(origin: CGPoint(x: -1000, y: 200)); var req = f.request(button: "middle")
     req["cmd"] = "pressAt"; req["x"] = 90; req["y"] = 70
     _ = try handle(req); try expectMouse(CGPoint(x: -910, y: 270), button: .center)
+}
+check("buttons", "event construction failure posts no movement or partial click") {
+    for (type, button) in [(CGEventType.mouseMoved, "left"), (.leftMouseDown, "left"), (.leftMouseUp, "left"), (.otherMouseUp, "middle")] {
+        let f = fixture(); mouseConstructionFailure = type
+        try refuse(f, button: button)
+    }
 }
 print("NATIVE_INPUT_CHECKS passed=\(passed) failed=\(failed)")
 exit(failed == 0 ? 0 : 1)

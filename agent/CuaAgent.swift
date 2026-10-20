@@ -146,26 +146,58 @@ func windowID(of el: AXUIElement) -> CGWindowID? {
     return w
 }
 
-// Mouse events go to one process and name its window, so a background window takes
-// them like a real click without the app being activated or the cursor moving.
-func postMouse(pid: pid_t, _ type: CGEventType, at p: CGPoint, button: CGMouseButton = .left, window: CGWindowID?, clickState: Int = 1) {
-    guard let e = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: button) else { return }
-    e.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
-    if let w = window {
-        e.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(w))
-        e.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(w))
+// Mouse events stay addressed to one process and window. Apps can reject background
+// clicks or change keyboard focus; callers must read again to check the result.
+private typealias MouseWindowSetter = @convention(c) (CGEvent, CGPoint) -> Void
+private typealias MouseWindowGetter = @convention(c) (CGEvent) -> CGPoint
+private let mouseWindowLocation: (set: MouseWindowSetter, get: MouseWindowGetter)? = {
+    guard let library = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY | RTLD_LOCAL) else { return nil }
+    defer { dlclose(library) }
+    // Private ABI declared in WebKit's Tools/TestRunnerShared/spi/CoreGraphicsTestSPI.h.
+    guard let setter = dlsym(library, "CGEventSetWindowLocation"), let getter = dlsym(library, "CGEventGetWindowLocation") else { return nil }
+    return (unsafeBitCast(setter, to: MouseWindowSetter.self), unsafeBitCast(getter, to: MouseWindowGetter.self))
+}()
+func mouseEvent(_ type: CGEventType, at p: CGPoint, button: CGMouseButton = .left, window: CGWindowID?, frame: CGRect, clickState: Int = 1) throws -> CGEvent {
+    guard let binding = mouseWindowLocation else { throw AgentError("This macOS version cannot bind mouse input to an exact window. No mouse events were sent.", code: "window_input_unavailable") }
+    guard let window = window, window > 0,
+          [frame.minX, frame.minY, frame.width, frame.height, frame.maxX, frame.maxY, p.x, p.y].allSatisfy({ $0.isFinite }),
+          frame.width > 0, frame.height > 0, p.x >= frame.minX, p.x <= frame.maxX, p.y >= frame.minY, p.y <= frame.maxY,
+          (0...3).contains(clickState), [.left, .right, .center].contains(button),
+          [.mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .rightMouseDragged, .otherMouseDown, .otherMouseUp, .otherMouseDragged].contains(type),
+          let kind = NSEvent.EventType(rawValue: UInt(type.rawValue)) else { throw AgentError("Invalid window-relative mouse event. No mouse events were sent.", code: "window_input_unavailable") }
+    let pressure: Float = [.mouseMoved, .leftMouseUp, .rightMouseUp, .otherMouseUp].contains(type) ? 0 : 1
+    guard let native = NSEvent.mouseEvent(with: kind, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: Int(window), context: nil, eventNumber: 0, clickCount: clickState, pressure: pressure),
+          let event = native.cgEvent else { throw AgentError("macOS could not construct this mouse event. No mouse events were sent.", code: "window_input_unavailable") }
+    let local = CGPoint(x: p.x - frame.minX, y: p.y - frame.minY)
+    // Setting the global point resets the private window point, so restore the latter last.
+    event.location = p; binding.set(event, local)
+    event.setIntegerValueField(.mouseEventButtonNumber, value: Int64(button.rawValue))
+    event.setIntegerValueField(.mouseEventClickState, value: Int64(clickState))
+    event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window))
+    event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window))
+    let stored = binding.get(event)
+    guard NSEvent(cgEvent: event)?.windowNumber == Int(window), event.location == p,
+          abs(stored.x - local.x) < 0.001, abs(stored.y - local.y) < 0.001 else {
+        throw AgentError("macOS did not preserve the selected window and point. No mouse events were sent.", code: "window_input_unavailable")
     }
+    return event
+}
+func postMouse(pid: pid_t, _ type: CGEventType, at p: CGPoint, button: CGMouseButton = .left, window: CGWindowID?, frame: CGRect, clickState: Int = 1) throws {
+    let e = try mouseEvent(type, at: p, button: button, window: window, frame: frame, clickState: clickState)
     e.postToPid(pid)
 }
-func eventClick(pid: pid_t, at p: CGPoint, window: CGWindowID?, button: String, count: Int) {
+func eventClick(pid: pid_t, at p: CGPoint, window: CGWindowID?, frame: CGRect, button: String, count: Int) throws {
+    guard (1...3).contains(count) else { throw AgentError("Click count must be between one and three") }
     let (down, up, b): (CGEventType, CGEventType, CGMouseButton) = button.hasPrefix("r") ? (.rightMouseDown, .rightMouseUp, .right)
         : button.hasPrefix("m") ? (.otherMouseDown, .otherMouseUp, .center) : (.leftMouseDown, .leftMouseUp, .left)
-    postMouse(pid: pid, .mouseMoved, at: p, window: window, clickState: 0)
-    usleep(20_000)
-    for n in 1...max(1, count) {
-        postMouse(pid: pid, down, at: p, button: b, window: window, clickState: n); usleep(30_000)
-        postMouse(pid: pid, up, at: p, button: b, window: window, clickState: n); usleep(40_000)
+    var events: [(CGEvent, useconds_t)] = [(try mouseEvent(.mouseMoved, at: p, window: window, frame: frame, clickState: 0), 20_000)]
+    for n in 1...count {
+        events.append((try mouseEvent(down, at: p, button: b, window: window, frame: frame, clickState: n), 30_000))
+        events.append((try mouseEvent(up, at: p, button: b, window: window, frame: frame, clickState: n), 40_000))
     }
+    // Construct every event before posting, so a missing binding cannot leave a button down.
+    for (event, delay) in events { event.postToPid(pid); usleep(delay) }
 }
 /// Mouse fallback stays inside the selected window and the target's current visible ancestry.
 func eventClick(_ el: AXUIElement, in t: Table, button: String, count: Int) throws {
@@ -228,23 +260,34 @@ func eventClick(_ el: AXUIElement, in t: Table, button: String, count: Int) thro
         }
         try checkProcess(t.pid, t.process)
         try reader.checkTime()
-        eventClick(pid: t.pid, at: point, window: id, button: button, count: count)
+        try eventClick(pid: t.pid, at: point, window: id, frame: t.window, button: button, count: count)
     } catch let failure as LookupFailure {
         throw AgentError("Cannot safely click this element: \(failure.message) No mouse events were sent.", code: "click_target_unavailable")
     }
 }
-func eventScroll(pid: pid_t, at p: CGPoint, window: CGWindowID?, direction: String, pixels: Double) {
+func eventScroll(pid: pid_t, at p: CGPoint, window: CGWindowID?, frame: CGRect, direction: String, pixels: Double) throws {
     let sign: Int32 = direction.hasPrefix("u") || direction.hasPrefix("l") ? 1 : -1
-    let horizontal = direction.hasPrefix("l") || direction.hasPrefix("r")
-    postMouse(pid: pid, .mouseMoved, at: p, window: window, clickState: 0)
-    let steps = 10, step = Int32(pixels / Double(steps))
-    for _ in 0..<steps {
-        guard let e = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
-                              wheel1: horizontal ? 0 : sign * step, wheel2: horizontal ? sign * step : 0, wheel3: 0) else { continue }
-        e.location = p
-        if let w = window { e.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(w)) }
-        e.postToPid(pid); usleep(12_000)
+    let horizontal = direction.hasPrefix("l") || direction.hasPrefix("r"), steps = 10
+    guard pixels.isFinite, pixels > 0, pixels / Double(steps) <= Double(Int32.max) else { throw AgentError("Scroll distance is out of range. No mouse events were sent.") }
+    let step = Int32(pixels / Double(steps))
+    guard let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
+                               wheel1: horizontal ? 0 : sign * step, wheel2: horizontal ? sign * step : 0, wheel3: 0) else {
+        throw AgentError("macOS could not construct the scroll event. No mouse events were sent.")
     }
+    let integers: [CGEventField] = [.scrollWheelEventDeltaAxis1, .scrollWheelEventDeltaAxis2, .scrollWheelEventDeltaAxis3,
+        .scrollWheelEventPointDeltaAxis1, .scrollWheelEventPointDeltaAxis2, .scrollWheelEventPointDeltaAxis3,
+        .scrollWheelEventIsContinuous, .scrollWheelEventScrollPhase, .scrollWheelEventScrollCount,
+        .scrollWheelEventMomentumPhase, .scrollWheelEventInstantMouser]
+    let fractions: [CGEventField] = [.scrollWheelEventFixedPtDeltaAxis1, .scrollWheelEventFixedPtDeltaAxis2, .scrollWheelEventFixedPtDeltaAxis3]
+    var events = [try mouseEvent(.mouseMoved, at: p, window: window, frame: frame, clickState: 0)]
+    for _ in 0..<steps {
+        let event = try mouseEvent(.mouseMoved, at: p, window: window, frame: frame, clickState: 0)
+        event.type = .scrollWheel
+        for field in integers { event.setIntegerValueField(field, value: scroll.getIntegerValueField(field)) }
+        for field in fractions { event.setDoubleValueField(field, value: scroll.getDoubleValueField(field)) }
+        events.append(event)
+    }
+    for e in events { e.postToPid(pid); if e.type == .scrollWheel { usleep(12_000) } }
 }
 
 func processIdentity(_ pid: pid_t) throws -> String {
@@ -1019,13 +1062,20 @@ func selectText(_ el: AXUIElement, text: String, prefix: String, suffix: String,
 }
 
 /// Drag with mouse events posted to one process only - the user's cursor never moves.
-func drag(pid: pid_t, window: CGWindowID?, from a: CGPoint, to b: CGPoint) {
-    let steps = max(4, Int(hypot(b.x - a.x, b.y - a.y) / 20))
-    func post(_ type: CGEventType, _ p: CGPoint) { postMouse(pid: pid, type, at: p, window: window) }
-    post(.mouseMoved, a); usleep(20_000)
-    post(.leftMouseDown, a); usleep(30_000)
-    for i in 1...steps { post(.leftMouseDragged, CGPoint(x: a.x + (b.x - a.x) * CGFloat(i) / CGFloat(steps), y: a.y + (b.y - a.y) * CGFloat(i) / CGFloat(steps))); usleep(12_000) }
-    post(.leftMouseUp, b)
+func drag(pid: pid_t, window: CGWindowID?, frame: CGRect, from a: CGPoint, to b: CGPoint) throws {
+    var events: [(CGEvent, useconds_t)] = [
+        (try mouseEvent(.mouseMoved, at: a, window: window, frame: frame, clickState: 0), 20_000),
+        (try mouseEvent(.leftMouseDown, at: a, window: window, frame: frame), 30_000)
+    ]
+    let release = try mouseEvent(.leftMouseUp, at: b, window: window, frame: frame)
+    let steps = max(4, Int(min(120, hypot(b.x - a.x, b.y - a.y) / 20)))
+    for i in 1...steps {
+        let fraction = CGFloat(i) / CGFloat(steps)
+        let point = CGPoint(x: a.x + (b.x - a.x) * fraction, y: a.y + (b.y - a.y) * fraction)
+        events.append((try mouseEvent(.leftMouseDragged, at: point, window: window, frame: frame), 12_000))
+    }
+    events.append((release, 0))
+    for (event, delay) in events { event.postToPid(pid); if delay > 0 { usleep(delay) } }
 }
 
 // MARK: - apps
@@ -1241,7 +1291,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         let relative = try point("x", "y", t), x = relative.x, y = relative.y
         // a coordinate click is a real click on that window, so canvases and custom views get it too
         let pt = CGPoint(x: t.window.minX + x, y: t.window.minY + y)
-        eventClick(pid: p, at: pt, window: t.windowID, button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
+        try eventClick(pid: p, at: pt, window: t.windowID, frame: t.window, button: req["button"] as? String ?? "left", count: (req["count"] as? NSNumber)?.intValue ?? 1)
         return ["center": ["x": x / Double(t.window.width), "y": y / Double(t.window.height)]]
     case "locate":
         // Read-only, for the on-screen pointer: where an element or point is, normalised to the
@@ -1280,7 +1330,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         let t = try table()
         let relative = try point("x", "y", t), x = relative.x, y = relative.y
         let dir = (req["direction"] as? String ?? "down").lowercased(), pages = max(1, (req["pages"] as? NSNumber)?.intValue ?? 1)
-        eventScroll(pid: p, at: CGPoint(x: t.window.minX + x, y: t.window.minY + y), window: t.windowID, direction: dir,
+        try eventScroll(pid: p, at: CGPoint(x: t.window.minX + x, y: t.window.minY + y), window: t.windowID, frame: t.window, direction: dir,
                     pixels: Double(t.window.height) * 0.8 * Double(pages))
         return ["center": ["x": x / Double(t.window.width), "y": y / Double(t.window.height)]]
     case "selectText":
@@ -1293,7 +1343,7 @@ func handle(_ req: [String: Any]) throws -> Any {
         let from = try point("fromX", "fromY", t), to = try point("toX", "toY", t)
         let coords = ["fromX": from.x, "fromY": from.y, "toX": to.x, "toY": to.y]
         let n = { (k: String) in coords[k]! }
-        drag(pid: p, window: t.windowID, from: CGPoint(x: t.window.minX + n("fromX"), y: t.window.minY + n("fromY")), to: CGPoint(x: t.window.minX + n("toX"), y: t.window.minY + n("toY")))
+        try drag(pid: p, window: t.windowID, frame: t.window, from: CGPoint(x: t.window.minX + n("fromX"), y: t.window.minY + n("fromY")), to: CGPoint(x: t.window.minX + n("toX"), y: t.window.minY + n("toY")))
         return ["center": ["x": Double(n("toX")) / Double(t.window.width), "y": Double(n("toY")) / Double(t.window.height)]]
     case "typeText":
         let p = try needPid(); let text = req["text"] as? String ?? ""
