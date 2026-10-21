@@ -327,6 +327,9 @@ Element targets follow their window when it moves. With `pointer.followActions`,
 also glides to each native click and keystroke target, so you can watch several agents work
 at once. Labels and rings fade after `pointer.labelSeconds`; an idle cursor fades after
 `pointer.idleSeconds`. The overlay quits after a quiet minute and returns on the next point.
+Completed annotation ink also disappears after `pointer.labelSeconds` (six seconds by
+default), after the current stroke ends. Waiting-guide ink and persistent selected areas
+stay visible. Name or label changes do not extend completed ink lifetime.
 
 ## Configuration
 

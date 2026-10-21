@@ -151,9 +151,11 @@ reappears.
 Window-relative targets track the window. An accessibility control that moves
 inside the window still needs a new read and point.
 
-After a turn, ordinary CUA point/action, or manual mark finishes, the cursor holds its position for 2.5 seconds. It waits for any stroke animation to finish. It then returns near your mouse and follows with a small offset. Existing annotations stay in their original positions. A new guide target stops this idle behavior immediately. A completed cursor can return even if its old target window closes.
+After a turn, ordinary CUA point/action, or manual mark finishes, the cursor holds its position for 2.5 seconds. It waits for any stroke animation to finish. It then returns near your mouse and follows with a small offset. The ink does not move with the cursor. A new guide target stops this idle behavior immediately. A completed cursor can return even if its old target window closes.
 
-Completed instructions disappear after the configured label lifetime. Their marks remain until you clear them. The compact popup shows **Done** and a **Clear marks** control for finished output. Clear marks keeps the conversation and draft. An active turn uses **Stop** instead.
+Completed instructions use the configured label lifetime. Completed circles, highlights, arrows, and freehand ink use the same lifetime, six seconds by default. A stroke in progress finishes first. Name and label changes do not restart the ink lifetime. Waiting guides and persistent selected areas keep their marks.
+
+The compact popup shows **Done** and a **Clear marks** control for finished output. Clear marks also removes the idle cursor. It keeps the conversation and draft. An active turn uses **Stop** instead.
 
 The native overlay samples mouse position locally at 30 Hz while a companion follows your mouse. It redraws for mouse changes; it does not write each sample to disk or send it to the model. The spring timer stops after the cursor settles. Reduce Motion removes flights. Clear marks or stop the conversation to remove its cursor.
 

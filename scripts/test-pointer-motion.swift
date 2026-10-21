@@ -117,6 +117,65 @@ final class MotionChecks: NSObject, NSApplicationDelegate {
         overlay.document = ["cursors": [:]]; overlay.tick(updateWindows: false)
         print("PASS active guide visit, departure, visual release, pending-state preservation, and fresh-update rearm on screen \(screenIndex)")
     }
+    @MainActor func checkCompletedInk(_ screenIndex: Int = 0) async {
+        let previousMouse = overlay.readMouse
+        defer { overlay.readMouse = previousMouse }
+        let screen = overlay.windows[screenIndex], top = NSScreen.screens.first!.frame.maxY
+        let x = screen.screen.frame.minX+100, y = top-screen.screen.frame.maxY+100
+        overlay.readMouse = { CGPoint(x: x+600, y: top-y-400) }
+        let now = Date().timeIntervalSince1970*1000
+        let rect: [String: Any] = ["screenRect": ["x": x, "y": y, "w": 120, "h": 80]]
+        let shapes: [[String: Any]] = [
+            ["id": "circle", "kind": "circle", "target": rect, "t": now-60000],
+            ["id": "highlight", "kind": "highlight", "target": rect, "t": now-60000],
+            ["id": "arrow", "kind": "arrow", "points": [[x,y],[x+120,y+80]], "t": now-60000],
+            ["id": "draw", "kind": "draw", "points": [[x,y],[x+60,y+80],[x+120,y]], "t": now-60000]
+        ]
+        var completed: [String: Any] = ["target": rect, "state": "done", "persistent": true, "t": now, "completedAt": now-5000, "annotations": shapes]
+        let waiting: [String: Any] = ["target": rect, "state": "waiting", "persistent": true, "t": now-60000, "annotations": shapes]
+        let selected: [String: Any] = ["target": rect, "kind": "rect", "state": "done", "persistent": true, "t": now-60000]
+        overlay.document = ["labelSeconds": 6, "cursors": ["completed": completed, "waiting": waiting, "selected": selected]]
+        overlay.tick(updateWindows: false)
+        let mark = overlay.marks["completed"]![screenIndex]!, layers = Array(mark.annotationLayers.values)
+        require(layers.count==4 && layers.allSatisfy { $0.opacity>0 }, "completed shapes keep their short hold even when their creation times are old")
+        completed["completedAt"] = now-7000
+        overlay.document = ["labelSeconds": 6, "cursors": ["completed": completed, "waiting": waiting, "selected": selected]]
+        let unchanged = NSDictionary(dictionary: overlay.document)
+        overlay.tick(updateWindows: false)
+        require(mark.annotationLayers.isEmpty && layers.allSatisfy { $0.superlayer == nil }, "expired circles, highlights, arrows, and freehand layers detach after their completed hold")
+        require(mark.cursor.superview != nil, "ink expiry keeps the companion cursor")
+        require(overlay.marks["waiting"]![screenIndex]!.annotationLayers.count==4, "ink expiry cannot erase a waiting guide")
+        require(overlay.marks["selected"]![screenIndex]!.ring.opacity>0, "ink expiry cannot erase a persistent selected area")
+        require(unchanged.isEqual(to: overlay.document), "presentation expiry cannot change guide or target authority")
+        overlay.marks.values.flatMap { $0.values }.forEach { $0.remove() }; overlay.marks = [:]; overlay.seen = [:]
+        overlay.tick(updateWindows: false)
+        require(overlay.marks["completed"]![screenIndex]!.annotationLayers.isEmpty, "display rebuild cannot revive expired ink")
+        completed["completedAt"] = nil; completed["t"] = now-7000
+        overlay.document = ["labelSeconds": 6, "cursors": ["completed": completed]]; overlay.tick(updateWindows: false)
+        require(overlay.marks["completed"]![screenIndex]!.annotationLayers.isEmpty, "older feeds without a completion clock also expire")
+        completed["state"] = "pointing"; completed["t"] = now; completed["annotations"] = [shapes[0]]
+        overlay.document = ["labelSeconds": 6, "cursors": ["completed": completed]]; overlay.tick(updateWindows: false)
+        let fresh = overlay.marks["completed"]![screenIndex]!.annotationLayers["circle"]!
+        require(fresh.opacity>0, "fresh work still draws after expiry")
+        completed["target"] = NSNull(); overlay.document = ["cursors": ["completed": completed]]; overlay.tick(updateWindows: false)
+        require(fresh.opacity==0, "a null target hides its ink")
+        overlay.document = ["cursors": [:]]; overlay.tick(updateWindows: false)
+        require(fresh.superlayer == nil && overlay.marks.isEmpty, "an empty feed detaches the actual ink layers")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            var stroke: [String: Any] = ["target": rect, "state": "pointing", "persistent": true, "t": now, "motion": "finishing",
+                "annotations": [["id": "finishing", "kind": "draw", "points": [[x,y],[x+120,y+80]], "t": Date().timeIntervalSince1970*1000, "durationMs": 250]]]
+            overlay.document = ["cursors": ["stroke": stroke]]; overlay.tick(updateWindows: false)
+            let drawing = overlay.marks["stroke"]![screenIndex]!
+            require(drawing.cursor.isTracing, "the owned completion case starts a real stroke trace")
+            stroke["state"] = "done"; stroke["completedAt"] = now-7000
+            overlay.document = ["labelSeconds": 6, "cursors": ["stroke": stroke]]; overlay.tick(updateWindows: false)
+            require(!drawing.annotationLayers.isEmpty, "expiry does not interrupt the current stroke")
+            await pause(0.4); overlay.tick(updateWindows: false)
+            require(drawing.annotationLayers.isEmpty, "completed ink clears after the protected stroke ends")
+            overlay.document = ["cursors": [:]]; overlay.tick(updateWindows: false)
+        }
+        print("PASS completed ink lifetime, rebuild, and active-guide/selection isolation on screen \(screenIndex)")
+    }
     @MainActor func check() async {
         let hz60:CGFloat=1/60, hz120:CGFloat=1/120, remainder:CGFloat=1/150
         let partitions:[[CGFloat]]=[Array(repeating:0.001,count:40),[0.04],[0.007,0.013,0.003,0.017],[hz60,hz60,remainder],[hz120,hz120,hz120,hz120,remainder]]
@@ -227,7 +286,7 @@ final class MotionChecks: NSObject, NSApplicationDelegate {
         require(mark.cursor.isTracing && overlay.presenceTimer==nil,"return delay cannot interrupt a long stroke")
         await pause(2);overlay.tick()
         require(!mark.cursor.isTracing && overlay.presenceTimer != nil,"finished stroke returns without another mouse event")
-        for index in overlay.windows.indices { await checkActiveGuidance(index) }
+        for index in overlay.windows.indices { await checkActiveGuidance(index); await checkCompletedInk(index) }
         if NSEvent.mouseLocation != realMouse {print("NOTE real mouse changed outside the simulated input source")}
         overlay.document = ["cursors": [:]];overlay.tick()
         require(overlay.marks.isEmpty,"cursor cleanup removes all native marks")

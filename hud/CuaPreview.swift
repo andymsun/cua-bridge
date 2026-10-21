@@ -875,6 +875,8 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
             attention[id] = focus
             let released = active && focus.released
             let returning = (state == "done" || released) && age >= 2.5 && !tracing
+            let inkAge = now.timeIntervalSince1970 - ((c["completedAt"] as? NSNumber)?.doubleValue ?? t) / 1000
+            let showInk = state != "done" || inkAge < labelSeconds || tracing
             guard let at = resolved ?? (returning ? (point:mouse,rect:nil) : nil) else {marks[id]?.values.forEach{$0.hide()};continue}
             let kind = c["kind"] as? String ?? "point", text = c["label"] as? String ?? ""
             let persistent = c["persistent"] as? Bool ?? false
@@ -895,8 +897,8 @@ final class PointerOverlay: NSObject, NSApplicationDelegate {
                 if !released, let origin = c["origin"] as? [String: NSNumber], let x = origin["x"], let y = origin["y"] {
                     mark.cursor.begin(at: PointerGeometry.local(CGPoint(x: x.doubleValue, y: y.doubleValue), screen: entry.screen.frame, primaryTop: top))
                 }
-                let motion = released ? nil : c["motion"] as? String
-                mark.annotations(c["annotations"] as? [[String: Any]] ?? [], motion: motion, local: { PointerGeometry.local($0, screen: entry.screen.frame, primaryTop: top) }, resolve: resolve)
+                let motion = (released || !showInk) ? nil : c["motion"] as? String
+                mark.annotations(showInk ? (c["annotations"] as? [[String: Any]] ?? []) : [], motion: motion, local: { PointerGeometry.local($0, screen: entry.screen.frame, primaryTop: top) }, resolve: resolve)
                 if motion == nil || !mark.cursor.isTracing { mark.cursor.move(to: p, click: fresh && !released && kind == "click") }
                 if fresh { mark.labelUntil = Date(timeIntervalSince1970: t / 1000).addingTimeInterval(labelSeconds) }
                 let show = persistent || now < mark.labelUntil

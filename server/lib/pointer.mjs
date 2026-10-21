@@ -73,15 +73,22 @@ export class Pointers {
   session({ name = "" } = {}) {
     const colors = config().pointer.colors;
     const id = `agent-${++this.#next}`;
-    this.#cursors.set(id, { name: label(name || `Agent ${this.#next}`), color: colors[(this.#next - 1) % colors.length], target: null, label: "", kind: "point", state: "idle", persistent: false, annotations: [], motion: null, t: 0 });
+    this.#cursors.set(id, { name: label(name || `Agent ${this.#next}`), color: colors[(this.#next - 1) % colors.length], target: null, label: "", kind: "point", state: "idle", persistent: false, annotations: [], motion: null, completedAt: null, t: 0 });
     return id;
+  }
+
+  #expireAnnotations(c) {
+    if (c.state !== "done" || Date.now() - (c.completedAt ?? c.t) < config().pointer.labelSeconds * 1000) return;
+    c.annotations = []; c.motion = null;
   }
 
   move(id, target, { text, kind = "point", persistent = false, origin } = {}) {
     const c = this.#cursors.get(id);
     if (!c || !config().pointer.enabled) return false;
     if (!["point", "rect", "spotlight", "click", "move"].includes(kind)) throw new Error(`unknown pointer kind ${kind}`);
-    Object.assign(c, { target: cleanTarget(target), origin: cleanOrigin(origin), label: label(text), kind, persistent: !!persistent, motion: null, state: "pointing", t: Date.now() });
+    const next = { target: cleanTarget(target), origin: cleanOrigin(origin), label: label(text), kind, persistent: !!persistent, motion: null, completedAt: null, state: "pointing", t: Date.now() };
+    this.#expireAnnotations(c);
+    Object.assign(c, next);
     this.#write(); this.launch();
     return true;
   }
@@ -91,9 +98,10 @@ export class Pointers {
     if (!c || !config().pointer.enabled) return false;
     const annotation = { ...cleanAnnotation(value), id: `mark-${++this.#annotation}`, t: Date.now() };
     c.origin = cleanOrigin(origin);
+    this.#expireAnnotations(c);
     c.annotations = [...c.annotations, annotation].slice(-12);
     c.target = annotation.target ?? { screen: annotation.points.at(-1) };
-    c.label = annotation.label; c.kind = "point"; c.persistent = true; c.state = "pointing"; c.motion = annotation.id; c.t = annotation.t;
+    c.label = annotation.label; c.kind = "point"; c.persistent = true; c.state = "pointing"; c.motion = annotation.id; c.completedAt = null; c.t = annotation.t;
     this.#write(); this.launch(); return annotation.id;
   }
 
@@ -126,10 +134,14 @@ export class Pointers {
     const c = this.#cursors.get(id);
     if (!c) return false;
     if (state !== undefined && !states.has(state)) throw new Error(`unknown cursor state ${state}`);
+    if (state !== undefined && state !== "done") this.#expireAnnotations(c);
+    const now = Date.now();
+    if (state === "done") c.completedAt ??= c.state === "done" ? c.t : now;
+    else if (state !== undefined) c.completedAt = null;
     if (name !== undefined) c.name = label(name);
     if (text !== undefined) c.label = label(text);
     if (state !== undefined) c.state = state;
-    c.t = Date.now(); if (c.target) this.#write();
+    c.t = now; if (c.target) this.#write();
     return true;
   }
 

@@ -14,6 +14,7 @@ try {
  assert.throws(()=>cleanAnnotation({kind:"draw",points:Array(513).fill([1,2])}),/512/);
  assert.throws(()=>cleanAnnotation({kind:"script",rect:{x:1,y:1,w:2,h:2}}),/kind/);
  const p=new Pointers(), a=p.session({name:"Andy"}), b=p.session({name:"Other"});
+ p.launch=()=>{};
  p.move(b,{screen:[10,20]});
  const circle=p.annotate(a,{kind:"circle",rect:{x:-400,y:80,w:180,h:90},label:"This control"});
  p.annotate(a,{kind:"arrow",points:[[-300,90],[-100,150]],label:"Next"});
@@ -22,6 +23,39 @@ try {
  for(let i=0;i<20;i++)p.annotate(a,{kind:"draw",points:[[i,0],[i,30]]});
  assert.equal(p.snapshot().cursors[a].annotations.length,12,"history is bounded");
  p.hide(a);assert.equal(p.snapshot().cursors[a],undefined);assert.ok(p.snapshot().cursors[b]);
+ mock.timers.enable({apis:['setTimeout','Date']});
+ const lifetime=p.snapshot().labelSeconds*1000;
+ for(const update of ['move','annotate','describe']){
+  const id=p.session({name:'Completed ink'}),old=p.annotate(id,{kind:'circle',rect:{x:10,y:20,w:80,h:40}});
+  p.describe(id,{state:'done'});const completedAt=Date.now();
+  assert.equal(p.snapshot().cursors[id].completedAt,completedAt,'completion has its own clock');
+  mock.timers.tick(lifetime-1000);p.describe(id,{name:'Renamed'});p.describe(id,{state:'done',text:'Finished'});
+  assert.equal(p.snapshot().cursors[id].completedAt,completedAt,'metadata and repeated Done cannot extend ink lifetime');
+  assert.equal(p.snapshot().cursors[id].annotations[0].id,old,'ink stays during its completed hold');
+  mock.timers.tick(1001);
+  if(update==='move')p.move(id,{screen:[20,30]});
+  if(update==='annotate')p.annotate(id,{kind:'arrow',points:[[20,30],[60,90]]});
+  if(update==='describe')p.describe(id,{name:'New active state',state:'waiting'});
+  const current=p.snapshot().cursors[id];
+  assert(!current.annotations.some(mark=>mark.id===old),update+' cannot revive expired ink');
+  assert.equal(current.annotations.length,update==='annotate'?1:0);
+  assert.equal(current.completedAt,null,'new work starts a new completion clock');
+  p.end(id);
+ }
+ const tracing=p.session({name:'Long stroke'}),stroke=p.annotate(tracing,{kind:'draw',points:[[20,30],[200,90]],durationMs:5000});
+ p.describe(tracing,{state:'done'});const traceCompletion=p.snapshot().cursors[tracing].completedAt;
+ mock.timers.tick(lifetime+1);p.describe(tracing,{name:'Renamed stroke'});
+ assert.equal(p.snapshot().cursors[tracing].annotations[0]?.id,stroke,'metadata leaves retirement to the renderer, which can still be tracing');
+ assert.equal(p.snapshot().cursors[tracing].completedAt,traceCompletion,'metadata cannot renew the native expiry clock');p.end(tracing);
+ const waiting=p.session({name:'Pending guide'}),reference=p.annotate(waiting,{kind:'highlight',rect:{x:20,y:30,w:80,h:40}});
+ p.describe(waiting,{state:'waiting'});mock.timers.tick(lifetime*3);p.describe(waiting,{name:'Still waiting'});
+ assert.equal(p.snapshot().cursors[waiting].annotations[0].id,reference,'pending guide ink is not expired');
+ assert.equal(p.snapshot().cursors[waiting].completedAt,null);
+ const area=p.session({name:'Selected area'});p.move(area,{screenRect:{x:40,y:50,w:80,h:90}},{kind:'rect',persistent:true});p.describe(area,{state:'done'});
+ mock.timers.tick(lifetime+1);p.describe(area,{name:'Kept selection'});
+ assert.deepEqual(p.snapshot().cursors[area].target,{screenRect:{x:40,y:50,w:80,h:90}},'ink expiry does not clear a selected area');
+ p.end(waiting);p.end(area);mock.timers.reset();
+ console.log('PASS completed ink expiry, stable completion time, safe rearm, and pending-guide/selection isolation');
  let finished=0;p.demo({bounds:{x:-1920,y:200,w:1920,h:1000},start:[-1000,500]},()=>finished++);
  assert.ok(p.snapshot().cursors[b],"demo does not clear another agent");
  p.stopDemo();assert.equal(finished,1);assert.deepEqual(Object.keys(p.snapshot().cursors),[b]);
@@ -36,4 +70,4 @@ try {
  assert.equal(finished,2,'demo automatically removes its cursor');
  assert.deepEqual(Object.keys(p.snapshot().cursors),[b]);mock.timers.reset();
  p.shutdown();console.log("PASS annotation validation, persistence, isolation, and demo cleanup");
-} finally {fs.rmSync(dir,{recursive:true,force:true})}
+} finally {mock.timers.reset();fs.rmSync(dir,{recursive:true,force:true})}
